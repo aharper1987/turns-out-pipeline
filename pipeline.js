@@ -46,7 +46,7 @@ const KEYS = {
   anthropic:  process.env.ANTHROPIC_API_KEY,
   elevenlabs: process.env.ELEVENLABS_API_KEY,
   pexels:     process.env.PEXELS_API_KEY,
-  youtube:    process.env.YOUTUBE_OAUTH_TOKEN,
+  youtube:    process.env.YT_TOKEN,
 };
 
 // ─── UTILITIES ───────────────────────────────────────────────────────────────
