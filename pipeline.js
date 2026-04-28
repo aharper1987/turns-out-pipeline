@@ -112,14 +112,24 @@ async function fetchPaperWithRetry() {
   for (let attempt = 0; attempt < CONFIG.TOPICS.length; attempt++) {
     const { topic, index } = pickTopic(tried);
     tried.push(index);
+
+    // Try PubMed first, fall back to Semantic Scholar for same topic
     try {
       const paper = await fetchPaper(topic);
       return { paper, topic };
     } catch (e) {
-      log('Topic "' + topic.label + '" failed (' + e.message + ') - trying next...', 'warn');
+      log('PubMed failed for "' + topic.label + '": ' + e.message, 'warn');
+      log('Falling back to Semantic Scholar...', 'info');
+      try {
+        const paper = await fetchPaperSemanticScholar(topic);
+        return { paper, topic };
+      } catch (e2) {
+        log('Semantic Scholar also failed for "' + topic.label + '": ' + e2.message, 'warn');
+        log('Trying next topic...', 'info');
+      }
     }
   }
-  throw new Error('All topics failed - PubMed may be unavailable');
+  throw new Error('All topics exhausted across PubMed and Semantic Scholar');
 }
 
 function schedulePublishTime() {
@@ -182,6 +192,51 @@ async function fetchPaper(topic) {
   return result;
 }
 
+
+// ─── STEP 1B: FETCH FROM SEMANTIC SCHOLAR ────────────────────────────────────
+
+async function fetchPaperSemanticScholar(topic) {
+  log('Fetching from Semantic Scholar for: ' + topic.label);
+
+  const query = encodeURIComponent(topic.query.replace(/\+/g, ' '));
+  const url =
+    'https://api.semanticscholar.org/graph/v1/paper/search' +
+    '?query=' + query +
+    '&fields=title,abstract,authors,year,citationCount,influentialCitationCount,externalIds,publicationDate' +
+    '&limit=10' +
+    '&publicationDateOrYear=2023-2026';
+
+  const data = await fetchJSON(url, {
+    headers: { 'User-Agent': 'TurnsOutPipeline/1.0' }
+  });
+
+  const papers = (data.data || [])
+    .filter(p => p.abstract && p.title)
+    .sort((a, b) => (b.influentialCitationCount || 0) - (a.influentialCitationCount || 0));
+
+  if (!papers.length) throw new Error('No papers found on Semantic Scholar');
+
+  const pool = papers.slice(0, 5);
+  const paper = pool[Math.floor(Math.random() * pool.length)];
+  const doi = paper.externalIds && paper.externalIds.DOI ? paper.externalIds.DOI : '';
+  const pmid = paper.externalIds && paper.externalIds.PubMed ? paper.externalIds.PubMed : '';
+
+  const result = {
+    pmid: pmid || paper.paperId,
+    title: paper.title || '',
+    authors: (paper.authors || []).slice(0, 3).map(function(a) { return a.name; }).join(', '),
+    journal: '',
+    date: paper.publicationDate || String(paper.year || ''),
+    abstract: (paper.abstract || '').slice(0, 2000),
+    url: doi ? 'https://doi.org/' + doi : 'https://www.semanticscholar.org/paper/' + paper.paperId,
+    citationCount: paper.citationCount || 0,
+    influentialCitations: paper.influentialCitationCount || 0,
+    source: 'Semantic Scholar',
+  };
+
+  log('Found (S2, ' + result.influentialCitations + ' influential citations): "' + result.title.slice(0, 70) + '..."', 'ok');
+  return result;
+}
 // ─── STEP 2: GENERATE SCRIPT ─────────────────────────────────────────────────
 
 async function generateScript(paper, topic) {
