@@ -1,0 +1,45 @@
+name: Turns Out — Auto Pipeline
+
+on:
+  schedule:
+    # Runs every Tuesday and Friday at 6:00 AM UTC (1am EST / 2am EDT)
+    - cron: "0 6 * * 2"
+    - cron: "0 6 * * 5"
+  # Also allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install FFmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          ELEVENLABS_API_KEY:   ${{ secrets.ELEVENLABS_API_KEY }}
+          PEXELS_API_KEY:       ${{ secrets.PEXELS_API_KEY }}
+          YT_TOKEN: ${{ secrets.YT_TOKEN }}
+        run: node pipeline.js
+
+      - name: Upload run log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log-${{ github.run_id }}
+          path: run_log_*.json
+          retention-days: 30
