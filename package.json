@@ -1,0 +1,15 @@
+{
+  "name": "turns-out-pipeline",
+  "version": "1.0.0",
+  "description": "Automated YouTube pipeline for @TurnsOutSci",
+  "type": "module",
+  "main": "pipeline.js",
+  "scripts": {
+    "start": "node pipeline.js",
+    "test": "node pipeline.js --dry-run"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {}
+}
