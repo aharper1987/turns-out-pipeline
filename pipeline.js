@@ -450,12 +450,19 @@ async function assembleVideo(clipPaths, audioPath, title) {
     { stdio: "pipe" }
   );
 
-  // Mix video + voiceover
+  // Generate captions with Whisper
+  const captionPath = await generateCaptions(audioPath);
+
+  // Escape caption path for ffmpeg subtitles filter
+  const escapedCaption = captionPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+
+  // Mix video + voiceover + burned-in captions
   const ffmpegOutput = execSync(
     `ffmpeg -y \
       -i "${scaledFootage}" \
       -i "${audioPath}" \
       -map 0:v:0 -map 1:a:0 \
+      -vf "subtitles='${escapedCaption}':force_style='FontName=Arial,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=4,Outline=1,Shadow=0,Bold=1,Alignment=2,MarginV=35'" \
       -c:v libx264 -preset fast -crf 22 \
       -c:a aac -b:a 128k \
       -shortest \
@@ -479,25 +486,103 @@ async function assembleVideo(clipPaths, audioPath, title) {
 }
 
 async function generateCaptions(audioPath) {
-  // Generate basic SRT using ffmpeg's speech detection timing estimate
-  // In production you could swap this for Whisper API for accurate captions
+  log("Transcribing audio with Whisper for word-level captions...");
   const srtPath = path.join(TMP, "captions.srt");
+  const whisperOut = path.join(TMP, "whisper_out");
 
-  // Get audio duration for caption timing
-  const duration = parseFloat(
+  try {
+    // Run whisper on the audio file — outputs captions to whisper_out dir
     execSync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
-    ).toString().trim()
-  );
+      `whisper "${audioPath}" --model small --output_format srt --output_dir "${whisperOut}" --language en 2>&1`,
+      { stdio: "pipe", timeout: 300000 } // 5 min timeout
+    );
 
-  // Write a simple SRT with one block — full caption
-  // For production, replace with Whisper word-level timestamps
-  fs.writeFileSync(
-    srtPath,
-    `1\n00:00:00,000 --> 00:00:${Math.floor(duration)},000\n[Watch with sound for full narration]\n`
-  );
+    // Whisper names the output file based on input filename
+    const audioBasename = path.basename(audioPath, path.extname(audioPath));
+    const whisperSrt = path.join(whisperOut, audioBasename + ".srt");
+
+    if (fs.existsSync(whisperSrt)) {
+      // Post-process SRT: split long lines into max 8 words per caption
+      const raw = fs.readFileSync(whisperSrt, "utf8");
+      const processed = processWhisperSrt(raw);
+      fs.writeFileSync(srtPath, processed);
+      log("Whisper captions generated", "ok");
+    } else {
+      throw new Error("Whisper output file not found at " + whisperSrt);
+    }
+  } catch (e) {
+    log("Whisper failed (" + e.message.slice(0, 100) + ") — falling back to placeholder captions", "warn");
+    const duration = parseFloat(
+      execSync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
+      ).toString().trim()
+    );
+    fs.writeFileSync(
+      srtPath,
+      `1\n00:00:00,000 --> 00:00:${Math.floor(duration)},000\n[Captions unavailable]\n`
+    );
+  }
 
   return srtPath;
+}
+
+function processWhisperSrt(raw) {
+  // Split Whisper's SRT blocks into shorter caption chunks (max 8 words)
+  // for better readability on screen
+  const blocks = raw.trim().split(/\n\n+/);
+  const output = [];
+  let idx = 1;
+
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    if (lines.length < 3) continue;
+
+    const timeLine = lines[1];
+    const text = lines.slice(2).join(" ").trim();
+    const words = text.split(" ").filter(Boolean);
+
+    if (words.length <= 8) {
+      output.push(`${idx}\n${timeLine}\n${text}`);
+      idx++;
+    } else {
+      // Parse start/end times and redistribute
+      const timeMatch = timeLine.match(/(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})/);
+      if (!timeMatch) continue;
+
+      const startMs = srtTimeToMs(timeMatch[1]);
+      const endMs = srtTimeToMs(timeMatch[2]);
+      const chunkSize = 7;
+      const chunks = [];
+
+      for (let i = 0; i < words.length; i += chunkSize) {
+        chunks.push(words.slice(i, i + chunkSize).join(" "));
+      }
+
+      const msDuration = (endMs - startMs) / chunks.length;
+      for (let i = 0; i < chunks.length; i++) {
+        const cStart = msToSrtTime(startMs + i * msDuration);
+        const cEnd = msToSrtTime(startMs + (i + 1) * msDuration);
+        output.push(`${idx}\n${cStart} --> ${cEnd}\n${chunks[i]}`);
+        idx++;
+      }
+    }
+  }
+
+  return output.join("\n\n") + "\n";
+}
+
+function srtTimeToMs(t) {
+  const [h, m, rest] = t.split(":");
+  const [s, ms] = rest.split(",");
+  return (+h * 3600 + +m * 60 + +s) * 1000 + +ms;
+}
+
+function msToSrtTime(ms) {
+  const h = Math.floor(ms / 3600000).toString().padStart(2, "0");
+  const m = Math.floor((ms % 3600000) / 60000).toString().padStart(2, "0");
+  const s = Math.floor((ms % 60000) / 1000).toString().padStart(2, "0");
+  const f = Math.floor(ms % 1000).toString().padStart(3, "0");
+  return `${h}:${m}:${s},${f}`;
 }
 
 // ─── STEP 7: GENERATE THUMBNAIL ───────────────────────────────────────────────
