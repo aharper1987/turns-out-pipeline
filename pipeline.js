@@ -450,24 +450,31 @@ async function assembleVideo(clipPaths, audioPath, title) {
     { stdio: "pipe" }
   );
 
-  // Mix video + voiceover, add subtle background music if available, add captions
-  // Generate SRT captions from script timing estimate
-  const captionPath = await generateCaptions(audioPath);
-
-  execSync(
+  // Mix video + voiceover
+  const ffmpegOutput = execSync(
     `ffmpeg -y \
       -i "${scaledFootage}" \
       -i "${audioPath}" \
       -map 0:v:0 -map 1:a:0 \
-      -vf "subtitles='${captionPath}':force_style='FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Bold=1,Alignment=2,MarginV=40'" \
       -c:v libx264 -preset fast -crf 22 \
       -c:a aac -b:a 128k \
       -shortest \
-      "${outputPath}" 2>/dev/null`,
+      "${outputPath}" 2>&1`,
     { stdio: "pipe" }
-  );
+  ).toString();
 
-  log("Video assembled", "ok");
+  // Verify output is a real video and not a tiny error file
+  const outputSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
+  if (outputSize < 500000) {
+    throw new Error(`Video assembly produced invalid file (${outputSize} bytes). FFmpeg: ${ffmpegOutput.slice(-500)}`);
+  }
+
+  const finalDuration = parseFloat(
+    execSync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputPath}"`
+    ).toString().trim()
+  );
+  log(`Video assembled — ${Math.round(finalDuration)}s (${(finalDuration/60).toFixed(1)} mins)`, "ok");
   return outputPath;
 }
 
