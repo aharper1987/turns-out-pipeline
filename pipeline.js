@@ -491,27 +491,38 @@ async function generateCaptions(audioPath) {
   const whisperOut = path.join(TMP, "whisper_out");
 
   try {
+    // Ensure output directory exists
+    if (!fs.existsSync(whisperOut)) fs.mkdirSync(whisperOut, { recursive: true });
+
     // Run whisper on the audio file — outputs captions to whisper_out dir
-    execSync(
+    const whisperResult = execSync(
       `whisper "${audioPath}" --model small --output_format srt --output_dir "${whisperOut}" --language en 2>&1`,
       { stdio: "pipe", timeout: 300000 } // 5 min timeout
-    );
+    ).toString();
+    log("Whisper output: " + whisperResult.slice(-200), "info");
 
     // Whisper names the output file based on input filename
     const audioBasename = path.basename(audioPath, path.extname(audioPath));
     const whisperSrt = path.join(whisperOut, audioBasename + ".srt");
 
-    if (fs.existsSync(whisperSrt)) {
-      // Post-process SRT: split long lines into max 8 words per caption
-      const raw = fs.readFileSync(whisperSrt, "utf8");
+    // Also check alternative naming (whisper sometimes drops extension differently)
+    const allFiles = fs.readdirSync(whisperOut);
+    log("Whisper output dir contents: " + allFiles.join(", "), "info");
+
+    const srtFile = allFiles.find(f => f.endsWith(".srt"));
+    const finalSrtPath = srtFile ? path.join(whisperOut, srtFile) : null;
+
+    if (finalSrtPath && fs.existsSync(finalSrtPath)) {
+      // Post-process SRT: split long lines into max 7 words per caption
+      const raw = fs.readFileSync(finalSrtPath, "utf8");
       const processed = processWhisperSrt(raw);
       fs.writeFileSync(srtPath, processed);
-      log("Whisper captions generated", "ok");
+      log("Whisper captions generated (" + processed.split("\n\n").length + " blocks)", "ok");
     } else {
-      throw new Error("Whisper output file not found at " + whisperSrt);
+      throw new Error("No SRT file found in whisper output dir. Files: " + allFiles.join(", "));
     }
   } catch (e) {
-    log("Whisper failed (" + e.message.slice(0, 100) + ") — falling back to placeholder captions", "warn");
+    log("Whisper failed (" + e.message.slice(0, 200) + ") — falling back to placeholder captions", "warn");
     const duration = parseFloat(
       execSync(
         `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
