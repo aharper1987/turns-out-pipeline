@@ -30,7 +30,7 @@ const CONFIG = {
   CHANNEL_ID: "UCugairkMHQVneS7C5SbIP0g",
   CHANNEL_HANDLE: "@TurnsOutSci",
   ELEVENLABS_VOICE_ID: "ptBd2v6mebIps3ZQEXD7", // Adela — British neutral female, 30s-40s
-  VIDEO_DURATION_TARGET: 90, // seconds
+  VIDEO_DURATION_TARGET: 600, // seconds (10 minutes)
   TOPICS: [
     { label: "Cancer research",    query: "cancer+therapy+clinical+trial",       pexels: "laboratory science" },
     { label: "Brain & dementia",   query: "dementia+alzheimer+cognitive+decline", pexels: "brain neuroscience" },
@@ -249,15 +249,23 @@ Study title: ${paper.title}
 Abstract: ${paper.abstract}
 Topic category: ${topic.label}
 
-Write a tight 90-second video script that follows this exact structure:
+Write a detailed 10-minute video script (approximately 1,400 words) that follows this exact structure:
 
-1. HOOK (2 sentences): Open with a surprising or counterintuitive statement that makes someone stop scrolling. Don't start with "Did you know." Be specific.
-2. THE STUDY (2-3 sentences): What did researchers actually do? Who studied what, using what method, on how many people/animals/samples?
-3. THE FINDING (3-4 sentences): What did they find? Explain it like the listener is smart but has zero science background. Use one concrete analogy.
-4. WHY IT MATTERS (2 sentences): What does this mean for real life? Be honest — don't overhype.
-5. SIGN-OFF (1 sentence): End with the channel catchphrase: "Turns out, scientists have been busy." then one punchy teaser for curiosity.
+1. COLD OPEN (100 words): Start mid-story with the most surprising or counterintuitive implication of this research. Drop the viewer into a vivid scenario or provocative claim. No "hey guys" intros. No "Did you know." End with a question that makes them need to keep watching.
 
-Write ONLY the script — no stage directions, no labels for each section, no markdown. Just the words to be spoken. Max 220 words.`;
+2. INTRO & CONTEXT (150 words): Zoom out. Why has this topic been studied at all? What's the broader problem or mystery scientists were trying to solve? Give a brief history of what we thought we knew before this study.
+
+3. THE STUDY EXPLAINED (250 words): Break down exactly what researchers did. Who were the subjects? What was the methodology? How long did it run? What were they measuring and why? Make it feel like you're walking the viewer through the lab. Use one concrete real-world analogy to explain the method.
+
+4. THE FINDINGS (250 words): What did they actually find? Go result by result. Explain each finding in plain English. Use comparisons, analogies, and scale ("that's like saying...") to make numbers and statistics feel real. Be honest about effect sizes — don't oversell.
+
+5. WHAT THIS MEANS (200 words): Connect the findings to everyday life. What should a normal person actually do with this information? Be practical and specific. Address likely skepticism or limitations honestly.
+
+6. THE BIGGER PICTURE (200 words): Where does this fit in the wider field? What questions does it raise? What research should come next? Are there competing theories or studies that push back?
+
+7. SIGN-OFF (150 words): Recap the single most mind-blowing takeaway in one sentence. Then raise one final provocative question the viewer will be thinking about. End with: "Turns out, scientists have been busy. And they're not done yet."
+
+Write ONLY the script — no stage directions, no section labels, no markdown, no headers. Just the words to be spoken out loud, flowing naturally from section to section. Target 1,400 words.`;
 
   const response = await fetchJSON("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -268,14 +276,15 @@ Write ONLY the script — no stage directions, no labels for each section, no ma
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 500,
+      max_tokens: 2000,
       messages: [{ role: "user", content: prompt }],
     }),
   });
 
   const script = response.content?.[0]?.text;
   assert(script, "Script generation failed");
-  log(`Script generated (${script.split(" ").length} words)`, "ok");
+  const wordCount = script.split(" ").length;
+  log(`Script generated (${wordCount} words / ~${Math.round(wordCount/140)} mins)`, "ok");
   return script;
 }
 
@@ -307,7 +316,7 @@ Respond ONLY with valid JSON, no markdown, no explanation:
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 600,
+      max_tokens: 800,
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -325,7 +334,7 @@ async function fetchFootage(topic) {
   assert(KEYS.pexels, "Missing PEXELS_API_KEY");
   log(`Fetching stock footage for: "${topic.pexels}"...`);
 
-  const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(topic.pexels)}&per_page=6&orientation=landscape&size=medium`;
+  const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(topic.pexels)}&per_page=15&orientation=landscape&size=medium`;
   const data = await fetchJSON(url, {
     headers: { Authorization: KEYS.pexels },
   });
@@ -339,7 +348,7 @@ async function fetchFootage(topic) {
       return file?.link;
     })
     .filter(Boolean)
-    .slice(0, 4);
+    .slice(0, 12);
 
   assert(clips.length, "No footage found");
 
