@@ -8,7 +8,7 @@
  *   2. Generate ELI5 script via Claude Haiku
  *   3. Fetch stock footage from Pexels
  *   4. Generate voiceover via ElevenLabs
- *   5. Assemble video via FFmpeg
+ *   5. Assemble video via FFmpeg (with bumper)
  *   6. Generate thumbnail prompt + title/description/tags
  *   7. Upload & schedule to YouTube
  */
@@ -31,6 +31,8 @@ const CONFIG = {
   CHANNEL_HANDLE: "@TurnsOutSci",
   ELEVENLABS_VOICE_ID: "ptBd2v6mebIps3ZQEXD7", // Adela — British neutral female, 30s-40s
   VIDEO_DURATION_TARGET: 600, // seconds (10 minutes)
+  BUMPER_DURATION: 3, // seconds
+  ASSETS_DIR: path.join(__dirname, "assets"),
   TOPICS: [
     { label: "Cancer research",    query: "cancer+therapy+clinical+trial",       pexels: "laboratory science" },
     { label: "Brain & dementia",   query: "dementia+alzheimer+cognitive+decline", pexels: "brain neuroscience" },
@@ -39,6 +41,7 @@ const CONFIG = {
     { label: "Food science",       query: "nutrition+diet+food+health+outcomes",  pexels: "healthy food" },
     { label: "Longevity & aging",  query: "longevity+aging+lifespan+senescence",  pexels: "aging health" },
   ],
+  MUSIC_CREDIT: `Music: "Upbeat Inspiring Corporate" by Pro Tunes - Copyright Safe Music | https://freemusicarchive.org/music/pro-tunes/single/upbeat-inspiring-corporate-1/`,
 };
 
 // API keys from environment variables (set as GitHub Secrets)
@@ -113,7 +116,6 @@ async function fetchPaperWithRetry() {
     const { topic, index } = pickTopic(tried);
     tried.push(index);
 
-    // Try PubMed first, fall back to Semantic Scholar for same topic
     try {
       const paper = await fetchPaper(topic);
       return { paper, topic };
@@ -133,7 +135,6 @@ async function fetchPaperWithRetry() {
 }
 
 function schedulePublishTime() {
-  // Schedule 3 days from now at 9am EST
   const d = new Date();
   d.setDate(d.getDate() + 3);
   d.setHours(14, 0, 0, 0); // 14:00 UTC = 9:00 EST / 10:00 EDT
@@ -154,7 +155,6 @@ async function fetchPaper(topic) {
   const ids = search.esearchresult?.idlist;
   if (!ids?.length) throw new Error("No papers found for topic");
 
-  // Pick a random paper from top 10 so we don't always use the same one
   const id = ids[Math.floor(Math.random() * Math.min(ids.length, 5))];
 
   const summaryUrl =
@@ -165,7 +165,6 @@ async function fetchPaper(topic) {
   const paper = summary.result?.[id];
   if (!paper) throw new Error("Could not fetch paper summary");
 
-  // Also fetch abstract
   const abstractUrl =
     `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi` +
     `?db=pubmed&id=${id}&rettype=abstract&retmode=text`;
@@ -178,20 +177,31 @@ async function fetchPaper(topic) {
     });
   });
 
+  // Extract all authors for credits (not just first 3)
+  const allAuthors = (paper.authors || []).map((a) => a.name);
+  const displayAuthors = allAuthors.slice(0, 3).join(", ") +
+    (allAuthors.length > 3 ? ` et al.` : "");
+
+  // Extract affiliation if available
+  const affiliation = paper.affiliations?.[0] || "";
+
   const result = {
     pmid: id,
     title: paper.title || "",
-    authors: (paper.authors || []).slice(0, 3).map((a) => a.name).join(", "),
+    authors: displayAuthors,
+    allAuthors,
+    affiliation,
     journal: paper.source || "",
     date: paper.pubdate || "",
-    abstract: abstract.slice(0, 2000), // cap at 2000 chars
+    abstract: abstract.slice(0, 2000),
     url: `https://pubmed.ncbi.nlm.nih.gov/${id}/`,
+    doi: paper.elocationid?.startsWith("doi:") ? paper.elocationid.replace("doi: ", "") : "",
+    source: "PubMed",
   };
 
   log(`Found: "${result.title.slice(0, 70)}..."`, "ok");
   return result;
 }
-
 
 // ─── STEP 1B: FETCH FROM SEMANTIC SCHOLAR ────────────────────────────────────
 
@@ -202,7 +212,7 @@ async function fetchPaperSemanticScholar(topic) {
   const url =
     'https://api.semanticscholar.org/graph/v1/paper/search' +
     '?query=' + query +
-    '&fields=title,abstract,authors,year,citationCount,influentialCitationCount,externalIds,publicationDate' +
+    '&fields=title,abstract,authors,year,citationCount,influentialCitationCount,externalIds,publicationDate,journal' +
     '&limit=10' +
     '&publicationDateOrYear=2023-2026';
 
@@ -218,17 +228,24 @@ async function fetchPaperSemanticScholar(topic) {
 
   const pool = papers.slice(0, 5);
   const paper = pool[Math.floor(Math.random() * pool.length)];
-  const doi = paper.externalIds && paper.externalIds.DOI ? paper.externalIds.DOI : '';
-  const pmid = paper.externalIds && paper.externalIds.PubMed ? paper.externalIds.PubMed : '';
+  const doi = paper.externalIds?.DOI || "";
+  const pmid = paper.externalIds?.PubMed || "";
+
+  const allAuthors = (paper.authors || []).map((a) => a.name);
+  const displayAuthors = allAuthors.slice(0, 3).join(", ") +
+    (allAuthors.length > 3 ? ` et al.` : "");
 
   const result = {
     pmid: pmid || paper.paperId,
     title: paper.title || '',
-    authors: (paper.authors || []).slice(0, 3).map(function(a) { return a.name; }).join(', '),
-    journal: '',
+    authors: displayAuthors,
+    allAuthors,
+    affiliation: "",
+    journal: paper.journal?.name || "",
     date: paper.publicationDate || String(paper.year || ''),
     abstract: (paper.abstract || '').slice(0, 2000),
-    url: doi ? 'https://doi.org/' + doi : 'https://www.semanticscholar.org/paper/' + paper.paperId,
+    url: pmid ? `https://pubmed.ncbi.nlm.nih.gov/${pmid}/` : (doi ? `https://doi.org/${doi}` : `https://www.semanticscholar.org/paper/${paper.paperId}`),
+    doi,
     citationCount: paper.citationCount || 0,
     influentialCitations: paper.influentialCitationCount || 0,
     source: 'Semantic Scholar',
@@ -237,15 +254,19 @@ async function fetchPaperSemanticScholar(topic) {
   log('Found (S2, ' + result.influentialCitations + ' influential citations): "' + result.title.slice(0, 70) + '..."', 'ok');
   return result;
 }
+
 // ─── STEP 2: GENERATE SCRIPT ─────────────────────────────────────────────────
 
 async function generateScript(paper, topic) {
   assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
-  log("Generating ELI5 script via Claude Haiku...");
+  log("Generating script via Claude Haiku...");
 
   const prompt = `You are writing a YouTube script for "Turns Out" — a science channel that explains real research in plain English for a general audience. The tone is witty, slightly quirky, and genuinely curious. Never dumbed down, never dry.
 
 Study title: ${paper.title}
+Authors: ${paper.authors}${paper.affiliation ? `\nInstitution: ${paper.affiliation}` : ""}
+Journal: ${paper.journal || "not specified"}
+Published: ${paper.date}
 Abstract: ${paper.abstract}
 Topic category: ${topic.label}
 
@@ -253,17 +274,19 @@ Write a detailed 10-minute video script (approximately 1,400 words) that follows
 
 1. COLD OPEN (100 words): Start mid-story with the most surprising or counterintuitive implication of this research. Drop the viewer into a vivid scenario or provocative claim. No "hey guys" intros. No "Did you know." End with a question that makes them need to keep watching.
 
-2. INTRO & CONTEXT (150 words): Zoom out. Why has this topic been studied at all? What's the broader problem or mystery scientists were trying to solve? Give a brief history of what we thought we knew before this study.
+2. INTRO & CONTEXT (150 words): Zoom out. Why has this topic been studied at all? What's the broader problem or mystery scientists were trying to solve? Give a brief history of what we thought we knew before this study — specifically call out any prior theories, consensus views, or previous findings that this research challenges, confirms, or overturns.
 
-3. THE STUDY EXPLAINED (250 words): Break down exactly what researchers did. Who were the subjects? What was the methodology? How long did it run? What were they measuring and why? Make it feel like you're walking the viewer through the lab. Use one concrete real-world analogy to explain the method.
+3. THE RESEARCHERS (100 words): Introduce who did this work. Name the lead researchers, their institutional affiliations, when the study was published, and where. Make it feel human — these are real scientists at real institutions, not just "a new study." Weave this in naturally, not as a list.
 
-4. THE FINDINGS (250 words): What did they actually find? Go result by result. Explain each finding in plain English. Use comparisons, analogies, and scale ("that's like saying...") to make numbers and statistics feel real. Be honest about effect sizes — don't oversell.
+4. THE STUDY EXPLAINED (200 words): Break down exactly what researchers did. Who were the subjects? What was the methodology? How long did it run? What were they measuring and why? Make it feel like you're walking the viewer through the lab. Use one concrete real-world analogy to explain the method.
 
-5. WHAT THIS MEANS (200 words): Connect the findings to everyday life. What should a normal person actually do with this information? Be practical and specific. Address likely skepticism or limitations honestly.
+5. THE FINDINGS (250 words): What did they actually find? Go result by result. Explain each finding in plain English. Use comparisons, analogies, and scale to make numbers feel real. Be honest about effect sizes.
 
-6. THE BIGGER PICTURE (200 words): Where does this fit in the wider field? What questions does it raise? What research should come next? Are there competing theories or studies that push back?
+6. WHAT THIS MEANS (200 words): Connect findings to everyday life. Be practical and specific. Address likely skepticism or limitations honestly.
 
-7. SIGN-OFF (150 words): Recap the single most mind-blowing takeaway in one sentence. Then raise one final provocative question the viewer will be thinking about. End with: "Turns out, scientists have been busy. And they're not done yet."
+7. THE BIGGER PICTURE (200 words): Where does this fit in the wider field? What prior conclusions does it confirm, challenge, or overturn? What questions does it raise? What research should come next?
+
+8. SIGN-OFF (100 words): Recap the single most mind-blowing takeaway. Raise one final provocative question. End with: "Turns out, scientists have been busy. And they're not done yet."
 
 Write ONLY the script — no stage directions, no section labels, no markdown, no headers. Just the words to be spoken out loud, flowing naturally from section to section. Target 1,400 words.`;
 
@@ -294,6 +317,18 @@ async function generateMetadata(paper, script, topic) {
   assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
   log("Generating video title, description, and tags...");
 
+  // Build research credits block
+  const doiLine   = paper.doi  ? `DOI: https://doi.org/${paper.doi}`                          : "";
+  const pmidLine  = paper.pmid && /^\d+$/.test(paper.pmid)
+                                ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${paper.pmid}/`    : "";
+  const linkLines = [doiLine, pmidLine].filter(Boolean).join("\n");
+
+  const researchCredits =
+    `Research & Credits:\n` +
+    `${paper.title} — ${paper.authors}${paper.affiliation ? `, ${paper.affiliation}` : ""}\n` +
+    `Published: ${paper.date}${paper.journal ? ` | ${paper.journal}` : ""}\n` +
+    (linkLines ? `${linkLines}\n` : "");
+
   const prompt = `Given this YouTube script for the channel "Turns Out" (@TurnsOutSci), generate video metadata.
 
 Script: ${script}
@@ -303,7 +338,7 @@ Topic: ${topic.label}
 Respond ONLY with valid JSON, no markdown, no explanation:
 {
   "title": "YouTube video title — punchy, under 60 chars, no clickbait, hint at the finding",
-  "description": "Full YouTube description — 3 paragraphs. First: one-sentence hook. Second: what the study found in plain English. Third: study citation and link. End with: New video every week. Subscribe: https://youtube.com/@TurnsOutSci",
+  "summary": "2-3 sentence plain-English summary of the key finding for the video description. Accessible, no jargon.",
   "tags": ["array", "of", "10-15", "relevant", "tags"]
 }`;
 
@@ -323,7 +358,24 @@ Respond ONLY with valid JSON, no markdown, no explanation:
 
   const raw = response.content?.[0]?.text || "";
   const clean = raw.replace(/```json|```/g, "").trim();
-  const metadata = JSON.parse(clean);
+  const meta = JSON.parse(clean);
+
+  // Assemble description using the mandatory template
+  const tagString = (meta.tags || []).map(t => t.startsWith("#") ? t : `#${t}`).join(" ");
+
+  const description =
+    `${meta.summary}\n\n` +
+    `${researchCredits}\n` +
+    `${tagString}\n\n` +
+    `New video every week. Subscribe: https://youtube.com/@TurnsOutSci\n\n` +
+    `${CONFIG.MUSIC_CREDIT}`;
+
+  const metadata = {
+    title: meta.title,
+    description,
+    tags: meta.tags,
+  };
+
   log(`Title: "${metadata.title}"`, "ok");
   return metadata;
 }
@@ -352,7 +404,6 @@ async function fetchFootage(topic) {
 
   assert(clips.length, "No footage found");
 
-  // Download clips
   const paths = [];
   for (let i = 0; i < clips.length; i++) {
     const dest = path.join(TMP, `clip_${i}.mp4`);
@@ -408,15 +459,55 @@ async function generateVoiceover(script) {
   return audioPath;
 }
 
-// ─── STEP 6: ASSEMBLE VIDEO ───────────────────────────────────────────────────
+// ─── STEP 6: BUILD BUMPER ────────────────────────────────────────────────────
+
+async function buildBumper() {
+  log("Building intro bumper...");
+
+  const bumperPath  = path.join(TMP, "bumper.mp4");
+  const logoPath    = path.join(CONFIG.ASSETS_DIR, "logo.png");
+  const musicPath   = path.join(CONFIG.ASSETS_DIR, "bumper_music.mp3");
+  const duration    = CONFIG.BUMPER_DURATION;
+
+  assert(fs.existsSync(logoPath),  `Missing assets/logo.png — add your logo to the assets/ folder`);
+  assert(fs.existsSync(musicPath), `Missing assets/bumper_music.mp3 — add the bumper track to the assets/ folder`);
+
+  // Fade-in 0.5s, hold, fade-out 0.5s on dark navy background
+  // Logo centred, scaled to fit within safe area
+  execSync(
+    `ffmpeg -y \
+      -loop 1 -t ${duration} -i "${logoPath}" \
+      -i "${musicPath}" \
+      -filter_complex "\
+        [0:v]scale=640:360:force_original_aspect_ratio=decrease,\
+        pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=#0A0E1A,\
+        fade=t=in:st=0:d=0.5,\
+        fade=t=out:st=${duration - 0.5}:d=0.5[v];\
+        [1:a]atrim=0:${duration},afade=t=in:st=0:d=0.5,afade=t=out:st=${duration - 0.5}:d=0.5[a]" \
+      -map "[v]" -map "[a]" \
+      -c:v libx264 -preset fast -crf 22 \
+      -c:a aac -b:a 128k \
+      -r 30 -pix_fmt yuv420p \
+      -t ${duration} \
+      "${bumperPath}" 2>/dev/null`,
+    { stdio: "pipe" }
+  );
+
+  log(`Bumper built (${duration}s)`, "ok");
+  return bumperPath;
+}
+
+// ─── STEP 7: ASSEMBLE VIDEO ───────────────────────────────────────────────────
 
 async function assembleVideo(clipPaths, audioPath, title) {
   log("Assembling video with FFmpeg...");
 
-  const outputPath = path.join(TMP, "final.mp4");
-  const concatList = path.join(TMP, "concat.txt");
-  const loopedFootage = path.join(TMP, "footage_loop.mp4");
-  const scaledFootage = path.join(TMP, "footage_scaled.mp4");
+  const mainPath    = path.join(TMP, "main.mp4");
+  const outputPath  = path.join(TMP, "final.mp4");
+  const concatList  = path.join(TMP, "concat.txt");
+  const loopedFootage  = path.join(TMP, "footage_loop.mp4");
+  const scaledFootage  = path.join(TMP, "footage_scaled.mp4");
+  const bumperConcatList = path.join(TMP, "bumper_concat.txt");
 
   // Get audio duration
   const audioDuration = parseFloat(
@@ -427,12 +518,10 @@ async function assembleVideo(clipPaths, audioPath, title) {
   log(`  Audio duration: ${audioDuration.toFixed(1)}s`);
 
   // Write concat list — repeat clips to fill audio duration
-  const clipDuration = audioDuration / clipPaths.length;
   let concatContent = "";
   for (const p of clipPaths) {
     concatContent += `file '${p}'\n`;
   }
-  // Repeat the list enough times to cover audio
   const repeats = Math.ceil(audioDuration / (clipPaths.length * 5)) + 1;
   let fullContent = "";
   for (let i = 0; i < repeats; i++) fullContent += concatContent;
@@ -444,7 +533,7 @@ async function assembleVideo(clipPaths, audioPath, title) {
     { stdio: "pipe" }
   );
 
-  // Scale to 1920x1080, add letterbox if needed
+  // Scale to 1920x1080
   execSync(
     `ffmpeg -y -i "${loopedFootage}" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" -c:v libx264 -preset fast -crf 23 "${scaledFootage}" 2>/dev/null`,
     { stdio: "pipe" }
@@ -452,11 +541,9 @@ async function assembleVideo(clipPaths, audioPath, title) {
 
   // Generate captions with Whisper
   const captionPath = await generateCaptions(audioPath);
-
-  // Escape caption path for ffmpeg subtitles filter
   const escapedCaption = captionPath.replace(/\\/g, "/").replace(/:/g, "\\:");
 
-  // Mix video + voiceover + burned-in captions
+  // Assemble main video (footage + voiceover + captions)
   const ffmpegOutput = execSync(
     `ffmpeg -y \
       -i "${scaledFootage}" \
@@ -466,14 +553,32 @@ async function assembleVideo(clipPaths, audioPath, title) {
       -c:v libx264 -preset fast -crf 22 \
       -c:a aac -b:a 128k \
       -shortest \
-      "${outputPath}" 2>&1`,
+      "${mainPath}" 2>&1`,
     { stdio: "pipe" }
   ).toString();
 
-  // Verify output is a real video and not a tiny error file
+  const mainSize = fs.existsSync(mainPath) ? fs.statSync(mainPath).size : 0;
+  if (mainSize < 500000) {
+    throw new Error(`Main video assembly produced invalid file (${mainSize} bytes). FFmpeg: ${ffmpegOutput.slice(-500)}`);
+  }
+
+  // Build bumper
+  const bumperPath = await buildBumper();
+
+  // Concatenate bumper + main video
+  fs.writeFileSync(
+    bumperConcatList,
+    `file '${bumperPath}'\nfile '${mainPath}'\n`
+  );
+
+  execSync(
+    `ffmpeg -y -f concat -safe 0 -i "${bumperConcatList}" -c copy "${outputPath}" 2>/dev/null`,
+    { stdio: "pipe" }
+  );
+
   const outputSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
   if (outputSize < 500000) {
-    throw new Error(`Video assembly produced invalid file (${outputSize} bytes). FFmpeg: ${ffmpegOutput.slice(-500)}`);
+    throw new Error(`Final video concat produced invalid file (${outputSize} bytes)`);
   }
 
   const finalDuration = parseFloat(
@@ -481,7 +586,7 @@ async function assembleVideo(clipPaths, audioPath, title) {
       `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputPath}"`
     ).toString().trim()
   );
-  log(`Video assembled — ${Math.round(finalDuration)}s (${(finalDuration/60).toFixed(1)} mins)`, "ok");
+  log(`Video assembled — ${Math.round(finalDuration)}s (${(finalDuration/60).toFixed(1)} mins, includes ${CONFIG.BUMPER_DURATION}s bumper)`, "ok");
   return outputPath;
 }
 
@@ -491,21 +596,14 @@ async function generateCaptions(audioPath) {
   const whisperOut = path.join(TMP, "whisper_out");
 
   try {
-    // Ensure output directory exists
     if (!fs.existsSync(whisperOut)) fs.mkdirSync(whisperOut, { recursive: true });
 
-    // Run whisper on the audio file — outputs captions to whisper_out dir
     const whisperResult = execSync(
       `whisper "${audioPath}" --model small --output_format srt --output_dir "${whisperOut}" --language en 2>&1`,
-      { stdio: "pipe", timeout: 300000 } // 5 min timeout
+      { stdio: "pipe", timeout: 300000 }
     ).toString();
     log("Whisper output: " + whisperResult.slice(-200), "info");
 
-    // Whisper names the output file based on input filename
-    const audioBasename = path.basename(audioPath, path.extname(audioPath));
-    const whisperSrt = path.join(whisperOut, audioBasename + ".srt");
-
-    // Also check alternative naming (whisper sometimes drops extension differently)
     const allFiles = fs.readdirSync(whisperOut);
     log("Whisper output dir contents: " + allFiles.join(", "), "info");
 
@@ -513,7 +611,6 @@ async function generateCaptions(audioPath) {
     const finalSrtPath = srtFile ? path.join(whisperOut, srtFile) : null;
 
     if (finalSrtPath && fs.existsSync(finalSrtPath)) {
-      // Post-process SRT: split long lines into max 7 words per caption
       const raw = fs.readFileSync(finalSrtPath, "utf8");
       const processed = processWhisperSrt(raw);
       fs.writeFileSync(srtPath, processed);
@@ -538,8 +635,6 @@ async function generateCaptions(audioPath) {
 }
 
 function processWhisperSrt(raw) {
-  // Split Whisper's SRT blocks into shorter caption chunks (max 8 words)
-  // for better readability on screen
   const blocks = raw.trim().split(/\n\n+/);
   const output = [];
   let idx = 1;
@@ -556,7 +651,6 @@ function processWhisperSrt(raw) {
       output.push(`${idx}\n${timeLine}\n${text}`);
       idx++;
     } else {
-      // Parse start/end times and redistribute
       const timeMatch = timeLine.match(/(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})/);
       if (!timeMatch) continue;
 
@@ -596,14 +690,13 @@ function msToSrtTime(ms) {
   return `${h}:${m}:${s},${f}`;
 }
 
-// ─── STEP 7: GENERATE THUMBNAIL ───────────────────────────────────────────────
+// ─── STEP 8: GENERATE THUMBNAIL ───────────────────────────────────────────────
 
 async function generateThumbnail(videoPath, metadata, topic) {
   log("Generating thumbnail from video frame...");
 
   const thumbPath = path.join(TMP, "thumbnail.jpg");
 
-  // 1. Get video duration
   const duration = parseFloat(
     execSync(
       `ffprobe -v error -show_entries format=duration \
@@ -611,7 +704,6 @@ async function generateThumbnail(videoPath, metadata, topic) {
     ).toString().trim()
   );
 
-  // Extract a frame at 20% in — past any intro cut, well before the end
   const seekTo = (duration * 0.20).toFixed(2);
   const rawFrame = path.join(TMP, "raw_frame.jpg");
   execSync(
@@ -619,7 +711,6 @@ async function generateThumbnail(videoPath, metadata, topic) {
     { stdio: "pipe" }
   );
 
-  // 2. Darken + warm-tint the frame so text reads cleanly over it
   const darkenedFrame = path.join(TMP, "darkened_frame.jpg");
   execSync(
     `ffmpeg -y -i "${rawFrame}" \
@@ -628,7 +719,6 @@ async function generateThumbnail(videoPath, metadata, topic) {
     { stdio: "pipe" }
   );
 
-  // 3. Wrap title into two lines at ~28 chars each
   const safeTitle = metadata.title.replace(/['"\\:]/g, " ").trim();
   const words = safeTitle.split(" ");
   let line1 = "";
@@ -642,25 +732,16 @@ async function generateThumbnail(videoPath, metadata, topic) {
   }
   const topicLabel = topic.label.toUpperCase().replace(/['"\\]/g, "");
 
-  // 4. Compose overlays with FFmpeg drawtext + drawbox
-  //    Layout: topic pill top-left | brand mark top-right | title bottom-left
   const font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
-  // Build filter as a sequential chain on a single input
   let vf = [
-    // Bottom scrim: semi-transparent dark rect for text legibility
     `drawbox=x=0:y=480:w=iw:h=240:color=#1A1610@0.72:t=fill`,
-    // Amber pill behind topic label
     `drawbox=x=30:y=30:w=230:h=40:color=#C17B2F@1.0:t=fill`,
-    // Topic label on pill
     `drawtext=fontfile='${font}':text='${topicLabel}':fontsize=18:fontcolor=#1A1610:x=42:y=41`,
-    // Brand mark top-right
     `drawtext=fontfile='${font}':text='TURNS OUT':fontsize=15:fontcolor=#8A7F6B:x=w-tw-30:y=42`,
-    // Title line 1
     `drawtext=fontfile='${font}':text='${line1}':fontsize=54:fontcolor=#F5EDD8:x=30:y=492:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
   ];
 
-  // Title line 2 only if needed
   if (line2) {
     vf.push(
       `drawtext=fontfile='${font}':text='${line2}':fontsize=54:fontcolor=#F5EDD8:x=30:y=556:shadowcolor=black@0.8:shadowx=2:shadowy=2`
@@ -676,7 +757,7 @@ async function generateThumbnail(videoPath, metadata, topic) {
   return thumbPath;
 }
 
-// ─── STEP 8: UPLOAD TO YOUTUBE ────────────────────────────────────────────────
+// ─── STEP 9: UPLOAD TO YOUTUBE ────────────────────────────────────────────────
 
 async function uploadToYouTube(videoPath, metadata, publishTime) {
   assert(KEYS.youtube, "Missing YOUTUBE_OAUTH_TOKEN");
@@ -694,11 +775,11 @@ async function uploadToYouTube(videoPath, metadata, publishTime) {
           title: metadata.title,
           description: metadata.description,
           tags: metadata.tags,
-          categoryId: "28", // Science & Technology
+          categoryId: "28",
           defaultLanguage: "en",
         },
         status: {
-          privacyStatus: "private", // set to private first, then schedule
+          privacyStatus: "private",
           publishAt: publishTime,
           selfDeclaredMadeForKids: false,
         },
@@ -747,16 +828,6 @@ async function uploadToYouTube(videoPath, metadata, publishTime) {
   }
 }
 
-// ─── CLEANUP ──────────────────────────────────────────────────────────────────
-
-function cleanup() {
-  log("Cleaning up temp files...");
-  fs.rmSync(TMP, { recursive: true, force: true });
-  fs.mkdirSync(TMP, { recursive: true });
-}
-
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
-
 async function uploadThumbnail(videoId, thumbPath) {
   log("Uploading thumbnail to YouTube...");
   const thumbBuffer = fs.readFileSync(thumbPath);
@@ -786,11 +857,9 @@ async function uploadThumbnail(videoId, thumbPath) {
   if (response.status === 200) {
     log("Thumbnail uploaded", "ok");
   } else {
-    // Thumbnail upload failure is non-fatal — video still goes live
     log(`Thumbnail upload returned ${response.status} — continuing`, "warn");
   }
 }
-
 
 // ─── REFRESH YOUTUBE TOKEN ────────────────────────────────────────────────────
 
@@ -824,22 +893,29 @@ async function refreshYouTubeToken() {
   log('YouTube token refreshed (expires in ' + response.expires_in + 's)', 'ok');
 }
 
+// ─── CLEANUP ──────────────────────────────────────────────────────────────────
+
+function cleanup() {
+  log("Cleaning up temp files...");
+  fs.rmSync(TMP, { recursive: true, force: true });
+  fs.mkdirSync(TMP, { recursive: true });
+}
+
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
+
 async function main() {
   console.log("\n╔════════════════════════════════════════╗");
-  console.log("║     Turns Out — Pipeline v1.0          ║");
+  console.log("║     Turns Out — Pipeline v2.0          ║");
   console.log("║     @TurnsOutSci                       ║");
   console.log(`║     ${new Date().toISOString().slice(0, 10)}                       ║`);
   console.log("╚════════════════════════════════════════╝\n");
 
-  // Validate required keys
   const missing = Object.entries(KEYS).filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) {
     log(`Missing API keys: ${missing.join(", ")}`, "err");
     log("Set them as environment variables or GitHub Secrets.", "warn");
     process.exit(1);
   }
-
-  // fetchPaperWithRetry handles topic selection and retries automatically
 
   try {
     await refreshYouTubeToken();
@@ -855,13 +931,20 @@ async function main() {
     const videoId   = await uploadToYouTube(video, metadata, publishAt);
     await uploadThumbnail(videoId, thumb);
 
-    // Save run log
     const runLog = {
       timestamp: new Date().toISOString(),
       topic: topic.label,
-      paper: { pmid: paper.pmid, title: paper.title, url: paper.url },
+      paper: {
+        pmid:    paper.pmid,
+        title:   paper.title,
+        authors: paper.authors,
+        journal: paper.journal,
+        date:    paper.date,
+        doi:     paper.doi,
+        url:     paper.url,
+      },
       videoId,
-      title: metadata.title,
+      title:     metadata.title,
       publishAt,
       wordCount: script.split(" ").length,
     };
