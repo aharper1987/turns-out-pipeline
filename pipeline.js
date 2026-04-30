@@ -9,7 +9,7 @@
  *   3. Fetch stock footage from Pexels
  *   4. Generate voiceover via ElevenLabs
  *   5. Assemble video via FFmpeg (with bumper)
- *   6. Generate thumbnail prompt + title/description/tags
+ *   6. Generate thumbnail
  *   7. Upload & schedule to YouTube
  */
 
@@ -34,7 +34,7 @@ const CONFIG = {
   BUMPER_DURATION: 3, // seconds
   ASSETS_DIR: path.join(__dirname, "assets"),
   TOPICS: [
-    { label: "Cancer research",    query: "cancer+therapy+clinical+trial",       pexels: "laboratory science" },
+    { label: "Cancer research",    query: "cancer+therapy+clinical+trial",        pexels: "laboratory science" },
     { label: "Brain & dementia",   query: "dementia+alzheimer+cognitive+decline", pexels: "brain neuroscience" },
     { label: "Fitness & health",   query: "exercise+health+fitness+metabolism",   pexels: "exercise fitness" },
     { label: "Child psychology",   query: "child+psychology+development+behavior",pexels: "children learning" },
@@ -49,7 +49,7 @@ const KEYS = {
   anthropic:      process.env.ANTHROPIC_API_KEY,
   elevenlabs:     process.env.ELEVENLABS_API_KEY,
   pexels:         process.env.PEXELS_API_KEY,
-  youtube:        process.env.YT_TOKEN, // overwritten at runtime by refreshYouTubeToken()
+  youtube:        process.env.YT_TOKEN,
   ytRefreshToken: process.env.YT_REFRESH_TOKEN,
   ytClientId:     process.env.YT_CLIENT_ID,
   ytClientSecret: process.env.YT_CLIENT_SECRET,
@@ -105,7 +105,7 @@ function pickTopic(excludeIndices = []) {
   const available = CONFIG.TOPICS
     .map((t, i) => ({ topic: t, index: i }))
     .filter(({ index }) => !excludeIndices.includes(index));
-  if (!available.length) throw new Error('All topics exhausted');
+  if (!available.length) throw new Error("All topics exhausted");
   const pick = available[Math.floor(Math.random() * available.length)];
   return pick;
 }
@@ -115,29 +115,28 @@ async function fetchPaperWithRetry() {
   for (let attempt = 0; attempt < CONFIG.TOPICS.length; attempt++) {
     const { topic, index } = pickTopic(tried);
     tried.push(index);
-
     try {
       const paper = await fetchPaper(topic);
       return { paper, topic };
     } catch (e) {
-      log('PubMed failed for "' + topic.label + '": ' + e.message, 'warn');
-      log('Falling back to Semantic Scholar...', 'info');
+      log('PubMed failed for "' + topic.label + '": ' + e.message, "warn");
+      log("Falling back to Semantic Scholar...", "info");
       try {
         const paper = await fetchPaperSemanticScholar(topic);
         return { paper, topic };
       } catch (e2) {
-        log('Semantic Scholar also failed for "' + topic.label + '": ' + e2.message, 'warn');
-        log('Trying next topic...', 'info');
+        log('Semantic Scholar also failed for "' + topic.label + '": ' + e2.message, "warn");
+        log("Trying next topic...", "info");
       }
     }
   }
-  throw new Error('All topics exhausted across PubMed and Semantic Scholar');
+  throw new Error("All topics exhausted across PubMed and Semantic Scholar");
 }
 
 function schedulePublishTime() {
   const d = new Date();
   d.setDate(d.getDate() + 3);
-  d.setHours(14, 0, 0, 0); // 14:00 UTC = 9:00 EST / 10:00 EDT
+  d.setHours(14, 0, 0, 0);
   return d.toISOString().replace(".000", "");
 }
 
@@ -177,12 +176,9 @@ async function fetchPaper(topic) {
     });
   });
 
-  // Extract all authors for credits (not just first 3)
   const allAuthors = (paper.authors || []).map((a) => a.name);
   const displayAuthors = allAuthors.slice(0, 3).join(", ") +
     (allAuthors.length > 3 ? ` et al.` : "");
-
-  // Extract affiliation if available
   const affiliation = paper.affiliations?.[0] || "";
 
   const result = {
@@ -206,25 +202,25 @@ async function fetchPaper(topic) {
 // ─── STEP 1B: FETCH FROM SEMANTIC SCHOLAR ────────────────────────────────────
 
 async function fetchPaperSemanticScholar(topic) {
-  log('Fetching from Semantic Scholar for: ' + topic.label);
+  log("Fetching from Semantic Scholar for: " + topic.label);
 
-  const query = encodeURIComponent(topic.query.replace(/\+/g, ' '));
+  const query = encodeURIComponent(topic.query.replace(/\+/g, " "));
   const url =
-    'https://api.semanticscholar.org/graph/v1/paper/search' +
-    '?query=' + query +
-    '&fields=title,abstract,authors,year,citationCount,influentialCitationCount,externalIds,publicationDate,journal' +
-    '&limit=10' +
-    '&publicationDateOrYear=2023-2026';
+    "https://api.semanticscholar.org/graph/v1/paper/search" +
+    "?query=" + query +
+    "&fields=title,abstract,authors,year,citationCount,influentialCitationCount,externalIds,publicationDate,journal" +
+    "&limit=10" +
+    "&publicationDateOrYear=2023-2026";
 
   const data = await fetchJSON(url, {
-    headers: { 'User-Agent': 'TurnsOutPipeline/1.0' }
+    headers: { "User-Agent": "TurnsOutPipeline/1.0" },
   });
 
   const papers = (data.data || [])
-    .filter(p => p.abstract && p.title)
+    .filter((p) => p.abstract && p.title)
     .sort((a, b) => (b.influentialCitationCount || 0) - (a.influentialCitationCount || 0));
 
-  if (!papers.length) throw new Error('No papers found on Semantic Scholar');
+  if (!papers.length) throw new Error("No papers found on Semantic Scholar");
 
   const pool = papers.slice(0, 5);
   const paper = pool[Math.floor(Math.random() * pool.length)];
@@ -237,21 +233,25 @@ async function fetchPaperSemanticScholar(topic) {
 
   const result = {
     pmid: pmid || paper.paperId,
-    title: paper.title || '',
+    title: paper.title || "",
     authors: displayAuthors,
     allAuthors,
     affiliation: "",
     journal: paper.journal?.name || "",
-    date: paper.publicationDate || String(paper.year || ''),
-    abstract: (paper.abstract || '').slice(0, 2000),
-    url: pmid ? `https://pubmed.ncbi.nlm.nih.gov/${pmid}/` : (doi ? `https://doi.org/${doi}` : `https://www.semanticscholar.org/paper/${paper.paperId}`),
+    date: paper.publicationDate || String(paper.year || ""),
+    abstract: (paper.abstract || "").slice(0, 2000),
+    url: pmid
+      ? `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`
+      : doi
+      ? `https://doi.org/${doi}`
+      : `https://www.semanticscholar.org/paper/${paper.paperId}`,
     doi,
     citationCount: paper.citationCount || 0,
     influentialCitations: paper.influentialCitationCount || 0,
-    source: 'Semantic Scholar',
+    source: "Semantic Scholar",
   };
 
-  log('Found (S2, ' + result.influentialCitations + ' influential citations): "' + result.title.slice(0, 70) + '..."', 'ok');
+  log('Found (S2, ' + result.influentialCitations + ' influential citations): "' + result.title.slice(0, 70) + '..."', "ok");
   return result;
 }
 
@@ -307,7 +307,7 @@ Write ONLY the script — no stage directions, no section labels, no markdown, n
   const script = response.content?.[0]?.text;
   assert(script, "Script generation failed");
   const wordCount = script.split(" ").length;
-  log(`Script generated (${wordCount} words / ~${Math.round(wordCount/140)} mins)`, "ok");
+  log(`Script generated (${wordCount} words / ~${Math.round(wordCount / 140)} mins)`, "ok");
   return script;
 }
 
@@ -317,10 +317,10 @@ async function generateMetadata(paper, script, topic) {
   assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
   log("Generating video title, description, and tags...");
 
-  // Build research credits block
-  const doiLine   = paper.doi  ? `DOI: https://doi.org/${paper.doi}`                          : "";
-  const pmidLine  = paper.pmid && /^\d+$/.test(paper.pmid)
-                                ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${paper.pmid}/`    : "";
+  const doiLine  = paper.doi ? `DOI: https://doi.org/${paper.doi}` : "";
+  const pmidLine = paper.pmid && /^\d+$/.test(paper.pmid)
+    ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${paper.pmid}/`
+    : "";
   const linkLines = [doiLine, pmidLine].filter(Boolean).join("\n");
 
   const researchCredits =
@@ -360,8 +360,7 @@ Respond ONLY with valid JSON, no markdown, no explanation:
   const clean = raw.replace(/```json|```/g, "").trim();
   const meta = JSON.parse(clean);
 
-  // Assemble description using the mandatory template
-  const tagString = (meta.tags || []).map(t => t.startsWith("#") ? t : `#${t}`).join(" ");
+  const tagString = (meta.tags || []).map((t) => (t.startsWith("#") ? t : `#${t}`)).join(" ");
 
   const description =
     `${meta.summary}\n\n` +
@@ -370,12 +369,7 @@ Respond ONLY with valid JSON, no markdown, no explanation:
     `New video every week. Subscribe: https://youtube.com/@TurnsOutSci\n\n` +
     `${CONFIG.MUSIC_CREDIT}`;
 
-  const metadata = {
-    title: meta.title,
-    description,
-    tags: meta.tags,
-  };
-
+  const metadata = { title: meta.title, description, tags: meta.tags };
   log(`Title: "${metadata.title}"`, "ok");
   return metadata;
 }
@@ -387,9 +381,7 @@ async function fetchFootage(topic) {
   log(`Fetching stock footage for: "${topic.pexels}"...`);
 
   const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(topic.pexels)}&per_page=15&orientation=landscape&size=medium`;
-  const data = await fetchJSON(url, {
-    headers: { Authorization: KEYS.pexels },
-  });
+  const data = await fetchJSON(url, { headers: { Authorization: KEYS.pexels } });
 
   const clips = (data.videos || [])
     .map((v) => {
@@ -464,21 +456,24 @@ async function generateVoiceover(script) {
 async function buildBumper() {
   log("Building intro bumper...");
 
-  const bumperPath  = path.join(TMP, "bumper.mp4");
-  const logoPath    = path.join(CONFIG.ASSETS_DIR, "logo.png");
-  const musicPath   = path.join(CONFIG.ASSETS_DIR, "bumper_music.mp3");
-  const duration    = CONFIG.BUMPER_DURATION;
+  const bumperPath = path.join(TMP, "bumper.mp4");
+  const logoPath   = path.join(CONFIG.ASSETS_DIR, "logo.png");
+  const musicPath  = path.join(CONFIG.ASSETS_DIR, "bumper_music.mp3");
+  const duration   = CONFIG.BUMPER_DURATION;
 
-  assert(fs.existsSync(logoPath),  `Missing assets/logo.png — add your logo to the assets/ folder`);
-  assert(fs.existsSync(musicPath), `Missing assets/bumper_music.mp3 — add the bumper track to the assets/ folder`);
+  assert(fs.existsSync(logoPath),  "Missing assets/logo.png");
+  assert(fs.existsSync(musicPath), "Missing assets/bumper_music.mp3");
 
-  // Fade-in 0.5s, hold, fade-out 0.5s on dark navy background
-  // Logo centred, scaled to fit within safe area
   const fadeOut = duration - 0.5;
-  const filterComplex = `[0:v]scale=640:360:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=#0A0E1A,fade=t=in:st=0:d=0.5,fade=t=out:st=${fadeOut}:d=0.5[v];[1:a]atrim=0:${duration},afade=t=in:st=0:d=0.5,afade=t=out:st=${fadeOut}:d=0.5[a]`;
+  const filterComplex =
+    `[0:v]scale=640:360:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=#0A0E1A,` +
+    `fade=t=in:st=0:d=0.5,fade=t=out:st=${fadeOut}:d=0.5[v];` +
+    `[1:a]atrim=0:${duration},afade=t=in:st=0:d=0.5,afade=t=out:st=${fadeOut}:d=0.5[a]`;
 
   execSync(
-    `ffmpeg -y -loop 1 -t ${duration} -i "${logoPath}" -i "${musicPath}" -filter_complex "${filterComplex}" -map "[v]" -map "[a]" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k -r 30 -pix_fmt yuv420p -t ${duration} "${bumperPath}"`,
+    `ffmpeg -y -loop 1 -t ${duration} -i "${logoPath}" -i "${musicPath}" ` +
+    `-filter_complex "${filterComplex}" -map "[v]" -map "[a]" ` +
+    `-c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k -r 30 -pix_fmt yuv420p -t ${duration} "${bumperPath}"`,
     { stdio: "pipe" }
   );
 
@@ -491,12 +486,12 @@ async function buildBumper() {
 async function assembleVideo(clipPaths, audioPath, title) {
   log("Assembling video with FFmpeg...");
 
-  const mainPath    = path.join(TMP, "main.mp4");
-  const outputPath  = path.join(TMP, "final.mp4");
-  const concatList  = path.join(TMP, "concat.txt");
-  const loopedFootage  = path.join(TMP, "footage_loop.mp4");
-  const scaledFootage  = path.join(TMP, "footage_scaled.mp4");
-  const bumperConcatList = path.join(TMP, "bumper_concat.txt");
+  const mainPath          = path.join(TMP, "main.mp4");
+  const outputPath        = path.join(TMP, "final.mp4");
+  const concatList        = path.join(TMP, "concat.txt");
+  const loopedFootage     = path.join(TMP, "footage_loop.mp4");
+  const scaledFootage     = path.join(TMP, "footage_scaled.mp4");
+  const bumperConcatList  = path.join(TMP, "bumper_concat.txt");
 
   // Get audio duration
   const audioDuration = parseFloat(
@@ -506,17 +501,15 @@ async function assembleVideo(clipPaths, audioPath, title) {
   );
   log(`  Audio duration: ${audioDuration.toFixed(1)}s`);
 
-  // Write concat list — repeat clips to fill audio duration
+  // Build concat list — repeat clips to fill duration
   let concatContent = "";
-  for (const p of clipPaths) {
-    concatContent += `file '${p}'\n`;
-  }
+  for (const p of clipPaths) concatContent += `file '${p}'\n`;
   const repeats = Math.ceil(audioDuration / (clipPaths.length * 5)) + 1;
   let fullContent = "";
   for (let i = 0; i < repeats; i++) fullContent += concatContent;
   fs.writeFileSync(concatList, fullContent);
 
-  // Concatenate and loop footage
+  // Loop footage
   execSync(
     `ffmpeg -y -f concat -safe 0 -i "${concatList}" -t ${audioDuration + 1} -c copy "${loopedFootage}" 2>/dev/null`,
     { stdio: "pipe" }
@@ -528,17 +521,12 @@ async function assembleVideo(clipPaths, audioPath, title) {
     { stdio: "pipe" }
   );
 
-  // Generate captions with Whisper
-  const captionPath = await generateCaptions(audioPath);
-  const escapedCaption = captionPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-
-  // Assemble main video (footage + voiceover + captions)
+  // Assemble main video — captions handled by YouTube auto-captions
   const ffmpegOutput = execSync(
     `ffmpeg -y \
       -i "${scaledFootage}" \
       -i "${audioPath}" \
       -map 0:v:0 -map 1:a:0 \
-      -vf "subtitles='${escapedCaption}':force_style='FontName=Arial,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=4,Outline=1,Shadow=0,Bold=1,Alignment=2,MarginV=35'" \
       -c:v libx264 -preset fast -crf 22 \
       -c:a aac -b:a 128k \
       -shortest \
@@ -548,17 +536,12 @@ async function assembleVideo(clipPaths, audioPath, title) {
 
   const mainSize = fs.existsSync(mainPath) ? fs.statSync(mainPath).size : 0;
   if (mainSize < 500000) {
-    throw new Error(`Main video assembly produced invalid file (${mainSize} bytes). FFmpeg: ${ffmpegOutput.slice(-500)}`);
+    throw new Error(`Main video assembly failed (${mainSize} bytes). FFmpeg: ${ffmpegOutput.slice(-500)}`);
   }
 
-  // Build bumper
+  // Build bumper and prepend
   const bumperPath = await buildBumper();
-
-  // Concatenate bumper + main video
-  fs.writeFileSync(
-    bumperConcatList,
-    `file '${bumperPath}'\nfile '${mainPath}'\n`
-  );
+  fs.writeFileSync(bumperConcatList, `file '${bumperPath}'\nfile '${mainPath}'\n`);
 
   execSync(
     `ffmpeg -y -f concat -safe 0 -i "${bumperConcatList}" -c copy "${outputPath}" 2>/dev/null`,
@@ -567,7 +550,7 @@ async function assembleVideo(clipPaths, audioPath, title) {
 
   const outputSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
   if (outputSize < 500000) {
-    throw new Error(`Final video concat produced invalid file (${outputSize} bytes)`);
+    throw new Error(`Final concat failed (${outputSize} bytes)`);
   }
 
   const finalDuration = parseFloat(
@@ -575,108 +558,8 @@ async function assembleVideo(clipPaths, audioPath, title) {
       `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputPath}"`
     ).toString().trim()
   );
-  log(`Video assembled — ${Math.round(finalDuration)}s (${(finalDuration/60).toFixed(1)} mins, includes ${CONFIG.BUMPER_DURATION}s bumper)`, "ok");
+  log(`Video assembled — ${Math.round(finalDuration)}s (${(finalDuration / 60).toFixed(1)} mins, includes ${CONFIG.BUMPER_DURATION}s bumper)`, "ok");
   return outputPath;
-}
-
-async function generateCaptions(audioPath) {
-  log("Transcribing audio with Whisper for word-level captions...");
-  const srtPath = path.join(TMP, "captions.srt");
-  const whisperOut = path.join(TMP, "whisper_out");
-
-  try {
-    if (!fs.existsSync(whisperOut)) fs.mkdirSync(whisperOut, { recursive: true });
-
-    const whisperResult = execSync(
-      `whisper "${audioPath}" --model small --output_format srt --output_dir "${whisperOut}" --language en 2>&1`,
-      { stdio: "pipe", timeout: 600000 } // 10 min timeout
-    ).toString();
-    log("Whisper output: " + whisperResult.slice(-200), "info");
-
-    const allFiles = fs.readdirSync(whisperOut);
-    log("Whisper output dir contents: " + allFiles.join(", "), "info");
-
-    const srtFile = allFiles.find(f => f.endsWith(".srt"));
-    const finalSrtPath = srtFile ? path.join(whisperOut, srtFile) : null;
-
-    if (finalSrtPath && fs.existsSync(finalSrtPath)) {
-      const raw = fs.readFileSync(finalSrtPath, "utf8");
-      const processed = processWhisperSrt(raw);
-      fs.writeFileSync(srtPath, processed);
-      log("Whisper captions generated (" + processed.split("\n\n").length + " blocks)", "ok");
-    } else {
-      throw new Error("No SRT file found in whisper output dir. Files: " + allFiles.join(", "));
-    }
-  } catch (e) {
-    log("Whisper failed (" + e.message.slice(0, 200) + ") — falling back to placeholder captions", "warn");
-    const duration = parseFloat(
-      execSync(
-        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
-      ).toString().trim()
-    );
-    fs.writeFileSync(
-      srtPath,
-      `1\n00:00:00,000 --> 00:00:${Math.floor(duration)},000\n[Captions unavailable]\n`
-    );
-  }
-
-  return srtPath;
-}
-
-function processWhisperSrt(raw) {
-  const blocks = raw.trim().split(/\n\n+/);
-  const output = [];
-  let idx = 1;
-
-  for (const block of blocks) {
-    const lines = block.split("\n");
-    if (lines.length < 3) continue;
-
-    const timeLine = lines[1];
-    const text = lines.slice(2).join(" ").trim();
-    const words = text.split(" ").filter(Boolean);
-
-    if (words.length <= 8) {
-      output.push(`${idx}\n${timeLine}\n${text}`);
-      idx++;
-    } else {
-      const timeMatch = timeLine.match(/(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})/);
-      if (!timeMatch) continue;
-
-      const startMs = srtTimeToMs(timeMatch[1]);
-      const endMs = srtTimeToMs(timeMatch[2]);
-      const chunkSize = 7;
-      const chunks = [];
-
-      for (let i = 0; i < words.length; i += chunkSize) {
-        chunks.push(words.slice(i, i + chunkSize).join(" "));
-      }
-
-      const msDuration = (endMs - startMs) / chunks.length;
-      for (let i = 0; i < chunks.length; i++) {
-        const cStart = msToSrtTime(startMs + i * msDuration);
-        const cEnd = msToSrtTime(startMs + (i + 1) * msDuration);
-        output.push(`${idx}\n${cStart} --> ${cEnd}\n${chunks[i]}`);
-        idx++;
-      }
-    }
-  }
-
-  return output.join("\n\n") + "\n";
-}
-
-function srtTimeToMs(t) {
-  const [h, m, rest] = t.split(":");
-  const [s, ms] = rest.split(",");
-  return (+h * 3600 + +m * 60 + +s) * 1000 + +ms;
-}
-
-function msToSrtTime(ms) {
-  const h = Math.floor(ms / 3600000).toString().padStart(2, "0");
-  const m = Math.floor((ms % 3600000) / 60000).toString().padStart(2, "0");
-  const s = Math.floor((ms % 60000) / 1000).toString().padStart(2, "0");
-  const f = Math.floor(ms % 1000).toString().padStart(3, "0");
-  return `${h}:${m}:${s},${f}`;
 }
 
 // ─── STEP 8: GENERATE THUMBNAIL ───────────────────────────────────────────────
@@ -688,8 +571,7 @@ async function generateThumbnail(videoPath, metadata, topic) {
 
   const duration = parseFloat(
     execSync(
-      `ffprobe -v error -show_entries format=duration \
-       -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`
     ).toString().trim()
   );
 
@@ -720,7 +602,6 @@ async function generateThumbnail(videoPath, metadata, topic) {
     }
   }
   const topicLabel = topic.label.toUpperCase().replace(/['"\\]/g, "");
-
   const font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
   let vf = [
@@ -730,7 +611,6 @@ async function generateThumbnail(videoPath, metadata, topic) {
     `drawtext=fontfile='${font}':text='TURNS OUT':fontsize=15:fontcolor=#8A7F6B:x=w-tw-30:y=42`,
     `drawtext=fontfile='${font}':text='${line1}':fontsize=54:fontcolor=#F5EDD8:x=30:y=492:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
   ];
-
   if (line2) {
     vf.push(
       `drawtext=fontfile='${font}':text='${line2}':fontsize=54:fontcolor=#F5EDD8:x=30:y=556:shadowcolor=black@0.8:shadowx=2:shadowy=2`
@@ -853,33 +733,33 @@ async function uploadThumbnail(videoId, thumbPath) {
 // ─── REFRESH YOUTUBE TOKEN ────────────────────────────────────────────────────
 
 async function refreshYouTubeToken() {
-  log('Refreshing YouTube OAuth token...');
-  assert(KEYS.ytRefreshToken, 'Missing YT_REFRESH_TOKEN');
-  assert(KEYS.ytClientId,     'Missing YT_CLIENT_ID');
-  assert(KEYS.ytClientSecret, 'Missing YT_CLIENT_SECRET');
+  log("Refreshing YouTube OAuth token...");
+  assert(KEYS.ytRefreshToken, "Missing YT_REFRESH_TOKEN");
+  assert(KEYS.ytClientId,     "Missing YT_CLIENT_ID");
+  assert(KEYS.ytClientSecret, "Missing YT_CLIENT_SECRET");
 
   const body = new URLSearchParams({
     client_id:     KEYS.ytClientId,
     client_secret: KEYS.ytClientSecret,
     refresh_token: KEYS.ytRefreshToken,
-    grant_type:    'refresh_token',
+    grant_type:    "refresh_token",
   }).toString();
 
-  const response = await fetchJSON('https://oauth2.googleapis.com/token', {
-    method: 'POST',
+  const response = await fetchJSON("https://oauth2.googleapis.com/token", {
+    method: "POST",
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Content-Length': Buffer.byteLength(body),
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Length": Buffer.byteLength(body),
     },
     body,
   });
 
   if (!response.access_token) {
-    throw new Error('Token refresh failed: ' + JSON.stringify(response));
+    throw new Error("Token refresh failed: " + JSON.stringify(response));
   }
 
   KEYS.youtube = response.access_token;
-  log('YouTube token refreshed (expires in ' + response.expires_in + 's)', 'ok');
+  log("YouTube token refreshed (expires in " + response.expires_in + "s)", "ok");
 }
 
 // ─── CLEANUP ──────────────────────────────────────────────────────────────────
@@ -909,7 +789,7 @@ async function main() {
   try {
     await refreshYouTubeToken();
     const { paper, topic } = await fetchPaperWithRetry();
-    log('Topic selected: ' + topic.label);
+    log("Topic selected: " + topic.label);
     const script    = await generateScript(paper, topic);
     const metadata  = await generateMetadata(paper, script, topic);
     const clips     = await fetchFootage(topic);
