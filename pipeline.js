@@ -474,22 +474,11 @@ async function buildBumper() {
 
   // Fade-in 0.5s, hold, fade-out 0.5s on dark navy background
   // Logo centred, scaled to fit within safe area
+  const fadeOut = duration - 0.5;
+  const filterComplex = `[0:v]scale=640:360:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=#0A0E1A,fade=t=in:st=0:d=0.5,fade=t=out:st=${fadeOut}:d=0.5[v];[1:a]atrim=0:${duration},afade=t=in:st=0:d=0.5,afade=t=out:st=${fadeOut}:d=0.5[a]`;
+
   execSync(
-    `ffmpeg -y \
-      -loop 1 -t ${duration} -i "${logoPath}" \
-      -i "${musicPath}" \
-      -filter_complex "\
-        [0:v]scale=640:360:force_original_aspect_ratio=decrease,\
-        pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=#0A0E1A,\
-        fade=t=in:st=0:d=0.5,\
-        fade=t=out:st=${duration - 0.5}:d=0.5[v];\
-        [1:a]atrim=0:${duration},afade=t=in:st=0:d=0.5,afade=t=out:st=${duration - 0.5}:d=0.5[a]" \
-      -map "[v]" -map "[a]" \
-      -c:v libx264 -preset fast -crf 22 \
-      -c:a aac -b:a 128k \
-      -r 30 -pix_fmt yuv420p \
-      -t ${duration} \
-      "${bumperPath}" 2>/dev/null`,
+    `ffmpeg -y -loop 1 -t ${duration} -i "${logoPath}" -i "${musicPath}" -filter_complex "${filterComplex}" -map "[v]" -map "[a]" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k -r 30 -pix_fmt yuv420p -t ${duration} "${bumperPath}"`,
     { stdio: "pipe" }
   );
 
@@ -600,7 +589,7 @@ async function generateCaptions(audioPath) {
 
     const whisperResult = execSync(
       `whisper "${audioPath}" --model small --output_format srt --output_dir "${whisperOut}" --language en 2>&1`,
-      { stdio: "pipe", timeout: 300000 }
+      { stdio: "pipe", timeout: 600000 } // 10 min timeout
     ).toString();
     log("Whisper output: " + whisperResult.slice(-200), "info");
 
