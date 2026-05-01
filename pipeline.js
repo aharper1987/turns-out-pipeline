@@ -431,12 +431,16 @@ async function assembleVideo(clipPaths, audioPath, title) {
   let fullContent = "";
   for (let i = 0; i < repeats; i++) fullContent += concatContent;
   fs.writeFileSync(concatList, fullContent);
+  // Step 1: Concat and normalize all clips to consistent codec (no duration limit yet)
+  const rawFootage = path.join(TMP, "footage_raw.mp4");
   execSync(
-    `ffmpeg -y -f concat -safe 0 -i "${concatList}" -t ${audioDuration} -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k "${loopedFootage}" 2>/dev/null`,
+    `ffmpeg -y -f concat -safe 0 -i "${concatList}" -c:v libx264 -preset ultrafast -crf 23 -an "${rawFootage}" 2>/dev/null`,
     { stdio: "pipe" }
   );
+
+  // Step 2: Loop the normalized footage, trim to exact audioDuration, and scale in one pass
   execSync(
-    `ffmpeg -y -i "${loopedFootage}" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" -c:v libx264 -preset fast -crf 23 "${scaledFootage}" 2>/dev/null`,
+    `ffmpeg -y -stream_loop -1 -i "${rawFootage}" -t ${audioDuration} -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" -c:v libx264 -preset ultrafast -crf 23 "${scaledFootage}" 2>/dev/null`,
     { stdio: "pipe" }
   );
   const ffmpegOutput = execSync(
