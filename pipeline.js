@@ -432,7 +432,7 @@ async function assembleVideo(clipPaths, audioPath, title) {
   for (let i = 0; i < repeats; i++) fullContent += concatContent;
   fs.writeFileSync(concatList, fullContent);
   execSync(
-    `ffmpeg -y -f concat -safe 0 -i "${concatList}" -t ${audioDuration} -c copy "${loopedFootage}" 2>/dev/null`,
+    `ffmpeg -y -f concat -safe 0 -i "${concatList}" -t ${audioDuration} -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k "${loopedFootage}" 2>/dev/null`,
     { stdio: "pipe" }
   );
   execSync(
