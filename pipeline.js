@@ -459,7 +459,7 @@ async function assembleVideo(clipPaths, audioPath, title) {
   fs.writeFileSync(bumperConcatList, `file '${bumperPath}'\nfile '${mainPath}'\n`);
   const totalDuration = CONFIG.BUMPER_DURATION + audioDuration;
   execSync(
-    `ffmpeg -y -f concat -safe 0 -i "${bumperConcatList}" -t ${totalDuration} -c copy "${outputPath}" 2>/dev/null`,
+    `ffmpeg -y -f concat -safe 0 -i "${bumperConcatList}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k "${outputPath}" 2>/dev/null`,
     { stdio: "pipe" }
   );
   const outputSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
@@ -614,6 +614,8 @@ async function uploadThumbnail(videoId, thumbPath) {
   });
   if (response.status === 200) {
     log("Thumbnail uploaded", "ok");
+  } else if (response.status === 403) {
+    log("Thumbnail 403 — add 'youtube.force-ssl' scope to your OAuth token and regenerate it", "warn");
   } else {
     log(`Thumbnail upload returned ${response.status} — continuing`, "warn");
   }
