@@ -459,7 +459,7 @@ async function assembleVideo(clipPaths, audioPath, title) {
   fs.writeFileSync(bumperConcatList, `file '${bumperPath}'\nfile '${mainPath}'\n`);
   const totalDuration = CONFIG.BUMPER_DURATION + audioDuration;
   execSync(
-    `ffmpeg -y -f concat -safe 0 -i "${bumperConcatList}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k "${outputPath}" 2>/dev/null`,
+    `ffmpeg -y -f concat -safe 0 -i "${bumperConcatList}" -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k "${outputPath}" 2>/dev/null`,
     { stdio: "pipe" }
   );
   const outputSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
