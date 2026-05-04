@@ -497,22 +497,31 @@ async function assembleVideo(clipPaths, audioPath, title) {
     ).toString().trim()
   );
   log(`  Audio duration: ${audioDuration.toFixed(1)}s`);
+
+  // Normalize each clip individually to consistent codec/fps/resolution
+  // This is fast per-clip and allows instant -c copy concat afterward
+  const normalizedPaths = [];
+  for (let i = 0; i < clipPaths.length; i++) {
+    const normPath = path.join(TMP, `norm_${i}.mp4`);
+    execSync(
+      `ffmpeg -y -i "${clipPaths[i]}" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30" -c:v libx264 -preset ultrafast -crf 23 -an "${normPath}" 2>/dev/null`,
+      { stdio: "pipe" }
+    );
+    normalizedPaths.push(normPath);
+  }
+  log(`  Normalized ${normalizedPaths.length} clips`);
+
+  // Build concat list — repeat normalized clips to cover full audio duration
   let concatContent = "";
-  for (const p of clipPaths) concatContent += `file '${p}'\n`;
-  const repeats = Math.ceil(audioDuration / (clipPaths.length * 5)) + 1;
+  for (const p of normalizedPaths) concatContent += `file '${p}'\n`;
+  const repeats = Math.ceil(audioDuration / (normalizedPaths.length * 4)) + 2;
   let fullContent = "";
   for (let i = 0; i < repeats; i++) fullContent += concatContent;
   fs.writeFileSync(concatList, fullContent);
-  // Step 1: Concat and normalize all clips to consistent codec (no duration limit yet)
-  const rawFootage = path.join(TMP, "footage_raw.mp4");
-  execSync(
-    `ffmpeg -y -f concat -safe 0 -i "${concatList}" -c:v libx264 -preset ultrafast -crf 23 -an "${rawFootage}" 2>/dev/null`,
-    { stdio: "pipe" }
-  );
 
-  // Step 2: Loop the normalized footage, trim to exact audioDuration, and scale in one pass
+  // Concat with -c copy (instant) then trim to exact audio duration
   execSync(
-    `ffmpeg -y -stream_loop -1 -i "${rawFootage}" -t ${audioDuration} -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" -c:v libx264 -preset ultrafast -crf 23 "${scaledFootage}" 2>/dev/null`,
+    `ffmpeg -y -f concat -safe 0 -i "${concatList}" -t ${audioDuration} -c copy "${scaledFootage}" 2>/dev/null`,
     { stdio: "pipe" }
   );
   const ffmpegOutput = execSync(
