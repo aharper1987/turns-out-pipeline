@@ -320,32 +320,104 @@ Respond ONLY with valid JSON, no markdown, no explanation:
   return metadata;
 }
 
+// ─── STEP 3B: GENERATE FOOTAGE SEARCH TERMS ──────────────────────────────────
+
+async function generateFootageSearchTerms(paper, topic) {
+  assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
+  log("Generating footage search terms...");
+
+  const prompt = `Given this science paper, generate 4 specific visual search terms for stock footage.
+
+Paper title: ${paper.title}
+Topic: ${topic.label}
+
+Rules:
+- Each term 2-3 words max
+- Visually concrete and filmable
+- Mix close-up scientific visuals with broader human/lifestyle scenes
+- Varied — don't repeat the same visual theme
+- Avoid generic terms like "science laboratory" every time
+
+Respond ONLY with a JSON array of exactly 4 strings, no markdown:
+["term one", "term two", "term three", "term four"]`;
+
+  const response = await fetchJSON("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": KEYS.anthropic,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 100,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  try {
+    const raw = response.content?.[0]?.text || "";
+    const clean = raw.replace(/```json|```/g, "").trim();
+    const terms = JSON.parse(clean);
+    if (Array.isArray(terms) && terms.length > 0) {
+      log(`Footage search terms: ${terms.join(", ")}`, "ok");
+      return terms;
+    }
+  } catch (e) {
+    log("Failed to parse footage terms — falling back to topic default", "warn");
+  }
+  return [topic.pexels];
+}
+
 // ─── STEP 4: FETCH STOCK FOOTAGE ─────────────────────────────────────────────
 
-async function fetchFootage(topic) {
+async function fetchFootage(topic, paper) {
   assert(KEYS.pexels, "Missing PEXELS_API_KEY");
-  log(`Fetching stock footage for: "${topic.pexels}"...`);
-  const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(topic.pexels)}&per_page=15&orientation=landscape&size=medium`;
-  const data = await fetchJSON(url, { headers: { Authorization: KEYS.pexels } });
-  const clips = (data.videos || [])
-    .map((v) => {
-      const file =
-        v.video_files?.find((f) => f.quality === "sd" && f.width >= 1280) ||
-        v.video_files?.find((f) => f.quality === "sd") ||
-        v.video_files?.[0];
-      return file?.link;
-    })
-    .filter(Boolean)
-    .slice(0, 12);
-  assert(clips.length, "No footage found");
+
+  const searchTerms = await generateFootageSearchTerms(paper, topic);
+  const clipsPerTerm = Math.ceil(12 / searchTerms.length);
+  const allClips = [];
+
+  for (const term of searchTerms) {
+    log(`  Searching footage: "${term}"...`);
+    try {
+      const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(term)}&per_page=${clipsPerTerm + 2}&orientation=landscape&size=medium`;
+      const data = await fetchJSON(url, { headers: { Authorization: KEYS.pexels } });
+      const clips = (data.videos || [])
+        .map((v) => {
+          const file =
+            v.video_files?.find((f) => f.quality === "sd" && f.width >= 1280) ||
+            v.video_files?.find((f) => f.quality === "sd") ||
+            v.video_files?.[0];
+          return file?.link;
+        })
+        .filter(Boolean)
+        .slice(0, clipsPerTerm);
+      allClips.push(...clips);
+    } catch (e) {
+      log(`  Search failed for "${term}" — skipping`, "warn");
+    }
+  }
+
+  if (!allClips.length) {
+    log("All searches failed — falling back to topic default", "warn");
+    const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(topic.pexels)}&per_page=12&orientation=landscape&size=medium`;
+    const data = await fetchJSON(url, { headers: { Authorization: KEYS.pexels } });
+    allClips.push(...(data.videos || []).map((v) => v.video_files?.[0]?.link).filter(Boolean));
+  }
+
+  assert(allClips.length, "No footage found");
+
   const paths = [];
-  for (let i = 0; i < clips.length; i++) {
+  const toDownload = allClips.slice(0, 12);
+  for (let i = 0; i < toDownload.length; i++) {
     const dest = path.join(TMP, `clip_${i}.mp4`);
-    log(`  Downloading clip ${i + 1}/${clips.length}...`);
-    await fetchBinary(clips[i], dest);
+    log(`  Downloading clip ${i + 1}/${toDownload.length}...`);
+    await fetchBinary(toDownload[i], dest);
     paths.push(dest);
   }
-  log(`Downloaded ${paths.length} clips`, "ok");
+
+  log(`Downloaded ${paths.length} clips across ${searchTerms.length} search terms`, "ok");
   return paths;
 }
 
@@ -699,7 +771,7 @@ async function main() {
     log("Topic selected: " + topic.label);
     const script    = await generateScript(paper, topic);
     const metadata  = await generateMetadata(paper, script, topic);
-    const clips     = await fetchFootage(topic);
+    const clips     = await fetchFootage(topic, paper);
     const audio     = await generateVoiceover(script);
     const video     = await assembleVideo(clips, audio, metadata.title);
     const thumb     = await generateThumbnail(video, metadata, topic);
