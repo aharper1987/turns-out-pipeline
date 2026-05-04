@@ -470,12 +470,28 @@ async function assembleVideo(clipPaths, audioPath, title) {
   if (outputSize < 500000) {
     throw new Error(`Final concat failed (${outputSize} bytes)`);
   }
+
+  // Hard trim — guarantee final video never exceeds 12 minutes regardless of assembly drift
+  const MAX_DURATION = 720; // 12 minutes
   const finalDuration = parseFloat(
     execSync(
       `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputPath}"`
     ).toString().trim()
   );
-  log(`Video assembled — ${Math.round(finalDuration)}s (${(finalDuration / 60).toFixed(1)} mins, includes ${CONFIG.BUMPER_DURATION}s bumper)`, "ok");
+
+  if (finalDuration > MAX_DURATION) {
+    log(`Video is ${Math.round(finalDuration)}s — trimming to ${MAX_DURATION}s...`, "warn");
+    const trimmedPath = path.join(TMP, "final_trimmed.mp4");
+    execSync(
+      `ffmpeg -y -i "${outputPath}" -t ${MAX_DURATION} -c copy "${trimmedPath}" 2>/dev/null`,
+      { stdio: "pipe" }
+    );
+    fs.renameSync(trimmedPath, outputPath);
+    log(`Trimmed to ${MAX_DURATION}s`, "ok");
+  }
+
+  const checkedDuration = finalDuration > MAX_DURATION ? MAX_DURATION : finalDuration;
+  log(`Video assembled — ${Math.round(checkedDuration)}s (${(checkedDuration / 60).toFixed(1)} mins, includes ${CONFIG.BUMPER_DURATION}s bumper)`, "ok");
   return outputPath;
 }
 
