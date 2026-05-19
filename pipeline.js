@@ -289,7 +289,7 @@ Topic: ${topic.label}
 
 Respond ONLY with valid JSON, no markdown, no explanation:
 {
-  "title": "YouTube video title — punchy, under 60 chars, no clickbait, hint at the finding",
+"title": "YouTube video title — max 60 chars, no clickbait. Use one of these proven formats: (1) Revelation: 'Turns Out [Common Belief] Is Wrong' — only when research genuinely overturns something. (2) Surprise finding: 'Scientists Just Discovered [Topic] Works Differently' (3) Curiosity gap: 'Why [Familiar Thing] Actually [Surprising Outcome]' (4) Specific + shocking stat: lead with the most counterintuitive number or finding. Capitalize ONE word for emphasis max. No exclamation marks. No 'You Won't Believe'. Front-load the most compelling word.",
   "summary": "2-3 sentence plain-English summary of the key finding. Accessible, no jargon.",
   "tags": ["array", "of", "10-15", "relevant", "tags"]
 }`;
