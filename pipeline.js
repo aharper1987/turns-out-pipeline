@@ -32,6 +32,13 @@ const CONFIG = {
     { label: "Child psychology",   query: "child+psychology+development+behavior",pexels: "children learning" },
     { label: "Food science",       query: "nutrition+diet+food+health+outcomes",  pexels: "healthy food" },
     { label: "Longevity & aging",  query: "longevity+aging+lifespan+senescence",  pexels: "aging health" },
+    { label: "Sleep science",        query: "sleep+health+cognition+outcomes+circadian",     pexels: "sleep rest night" },
+    { label: "Mental health",        query: "depression+anxiety+treatment+intervention+brain", pexels: "mental health therapy" },
+    { label: "Human behavior",       query: "behavior+psychology+decision+social+cognition",  pexels: "people behavior social" },
+    { label: "Animal cognition",     query: "animal+cognition+intelligence+behavior+learning", pexels: "animals wildlife nature" },
+    { label: "Space & cosmology",    query: "cosmology+exoplanet+galaxy+universe+astronomy",  pexels: "space stars galaxy" },
+    { label: "Psychedelics",         query: "psilocybin+psychedelic+ketamine+therapy+neural", pexels: "neuroscience brain research" },
+    { label: "Gut microbiome",       query: "microbiome+gut+bacteria+health+brain+axis",      pexels: "gut health digestion" },
   ],
 };
 
