@@ -124,8 +124,9 @@ async function fetchPaperWithRetry() {
 
 function schedulePublishTime() {
   const d = new Date();
-  d.setDate(d.getDate() + 3);
-  d.setHours(14, 0, 0, 0);
+  // Schedule for tomorrow at 11:00 UTC (7AM ET)
+  d.setDate(d.getDate() + 1);
+  d.setUTCHours(11, 0, 0, 0);
   return d.toISOString().replace(".000", "");
 }
 
