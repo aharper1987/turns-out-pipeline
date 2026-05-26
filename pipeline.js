@@ -32,13 +32,6 @@ const CONFIG = {
     { label: "Child psychology",   query: "child+psychology+development+behavior",pexels: "children learning" },
     { label: "Food science",       query: "nutrition+diet+food+health+outcomes",  pexels: "healthy food" },
     { label: "Longevity & aging",  query: "longevity+aging+lifespan+senescence",  pexels: "aging health" },
-    { label: "Sleep science",        query: "sleep+health+cognition+outcomes+circadian",     pexels: "sleep rest night" },
-    { label: "Mental health",        query: "depression+anxiety+treatment+intervention+brain", pexels: "mental health therapy" },
-    { label: "Human behavior",       query: "behavior+psychology+decision+social+cognition",  pexels: "people behavior social" },
-    { label: "Animal cognition",     query: "animal+cognition+intelligence+behavior+learning", pexels: "animals wildlife nature" },
-    { label: "Space & cosmology",    query: "cosmology+exoplanet+galaxy+universe+astronomy",  pexels: "space stars galaxy" },
-    { label: "Psychedelics",         query: "psilocybin+psychedelic+ketamine+therapy+neural", pexels: "neuroscience brain research" },
-    { label: "Gut microbiome",       query: "microbiome+gut+bacteria+health+brain+axis",      pexels: "gut health digestion" },
   ],
 };
 
@@ -131,9 +124,8 @@ async function fetchPaperWithRetry() {
 
 function schedulePublishTime() {
   const d = new Date();
-  // Schedule for tomorrow at 11:00 UTC (7AM ET)
-  d.setDate(d.getDate() + 1);
-  d.setUTCHours(11, 0, 0, 0);
+  d.setDate(d.getDate() + 3);
+  d.setHours(14, 0, 0, 0);
   return d.toISOString().replace(".000", "");
 }
 
@@ -296,7 +288,8 @@ Topic: ${topic.label}
 
 Respond ONLY with valid JSON, no markdown, no explanation:
 {
-"title": "YouTube video title — max 60 chars, no clickbait. Use one of these proven formats: (1) Revelation: 'Turns Out [Common Belief] Is Wrong' — only when research genuinely overturns something. (2) Surprise finding: 'Scientists Just Discovered [Topic] Works Differently' (3) Curiosity gap: 'Why [Familiar Thing] Actually [Surprising Outcome]' (4) Specific + shocking stat: lead with the most counterintuitive number or finding. Capitalize ONE word for emphasis max. No exclamation marks. No 'You Won't Believe'. Front-load the most compelling word.",
+  "title": "YouTube video title — punchy, under 60 chars, no clickbait, hint at the finding",
+  "short_title": "YouTube Shorts title — under 40 chars, hook-first, ends with a question or surprising claim",
   "summary": "2-3 sentence plain-English summary of the key finding. Accessible, no jargon.",
   "tags": ["array", "of", "10-15", "relevant", "tags"]
 }`;
@@ -323,7 +316,7 @@ Respond ONLY with valid JSON, no markdown, no explanation:
     `${tagString}\n\n` +
     `New video every week. Subscribe: https://youtube.com/@TurnsOutSci\n\n` +
     `${CONFIG.MUSIC_CREDIT}`;
-  const metadata = { title: meta.title, description, tags: meta.tags };
+  const metadata = { title: meta.title, shortTitle: meta.short_title || meta.title, description, tags: meta.tags };
   log(`Title: "${metadata.title}"`, "ok");
   return metadata;
 }
@@ -768,6 +761,178 @@ function cleanup() {
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
+
+// ─── SHORT: ASSEMBLE ─────────────────────────────────────────────────────────
+
+async function assembleShort(audioPath, clipPaths, metadata, topic) {
+  log("Assembling Short (vertical 9:16, 55s)...");
+
+  const SHORT_DURATION = 55; // seconds — safely under 60s YouTube Shorts limit
+  const shortAudio     = path.join(TMP, "short_audio.mp3");
+  const shortClip      = path.join(TMP, "short_clip.mp4");
+  const shortScaled    = path.join(TMP, "short_scaled.mp4");
+  const shortOutput    = path.join(TMP, "short_final.mp4");
+  const font           = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+
+  // Trim audio to 55 seconds
+  execSync(
+    `ffmpeg -y -i "${audioPath}" -t ${SHORT_DURATION} -c:a aac -b:a 128k "${shortAudio}" 2>/dev/null`,
+    { stdio: "pipe" }
+  );
+
+  // Use first available normalized clip as base (already 1920x1080)
+  const baseClip = clipPaths[0];
+
+  // Trim clip to 55 seconds
+  execSync(
+    `ffmpeg -y -i "${baseClip}" -t ${SHORT_DURATION} -c copy "${shortClip}" 2>/dev/null`,
+    { stdio: "pipe" }
+  );
+
+  // Crop 1920x1080 to vertical 608x1080 (9:16), then scale to 1080x1920
+  // Crop from center: x=(1920-608)/2=656
+  execSync(
+    `ffmpeg -y -i "${shortClip}" -vf "crop=608:1080:656:0,scale=1080:1920" -c:v libx264 -preset ultrafast -crf 23 "${shortScaled}" 2>/dev/null`,
+    { stdio: "pipe" }
+  );
+
+  // Build title overlay for Short — large centered text, topic pill, brand mark
+  const safeTitle = metadata.shortTitle.replace(/['"\\:]/g, " ").trim();
+  const words = safeTitle.split(" ");
+  let line1 = "", line2 = "", line3 = "";
+  for (const word of words) {
+    if ((line1 + " " + word).trim().length <= 18) {
+      line1 = (line1 + " " + word).trim();
+    } else if ((line2 + " " + word).trim().length <= 18) {
+      line2 = (line2 + " " + word).trim();
+    } else {
+      line3 = (line3 + " " + word).trim();
+    }
+  }
+  const topicLabel = topic.label.toUpperCase().replace(/['"\\]/g, "");
+
+  // For Shorts: 1080x1920 canvas
+  // Title centered vertically in top third, topic pill at top, brand at bottom
+  let vf = [
+    // Dark scrim across top third for title legibility
+    `drawbox=x=0:y=0:w=iw:h=700:color=#1A1610@0.75:t=fill`,
+    // Topic pill top-center
+    `drawbox=x=(iw-240)/2:y=40:w=240:h=44:color=#C17B2F@1.0:t=fill`,
+    `drawtext=fontfile='${font}':text='${topicLabel}':fontsize=20:fontcolor=#1A1610:x=(w-tw)/2:y=50`,
+    // Title lines centered
+    `drawtext=fontfile='${font}':text='${line1}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=150:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
+  ];
+  if (line2) vf.push(`drawtext=fontfile='${font}':text='${line2}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=230:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
+  if (line3) vf.push(`drawtext=fontfile='${font}':text='${line3}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=310:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
+  // Brand mark bottom
+  vf.push(`drawtext=fontfile='${font}':text='TURNS OUT':fontsize=22:fontcolor=#8A7F6B:x=(w-tw)/2:y=h-60`);
+
+  // Combine vertical video + trimmed audio + text overlay
+  execSync(
+    `ffmpeg -y \
+      -i "${shortScaled}" \
+      -i "${shortAudio}" \
+      -map 0:v:0 -map 1:a:0 \
+      -vf "${vf.join(",")}" \
+      -c:v libx264 -preset ultrafast -crf 22 \
+      -c:a aac -b:a 128k \
+      -t ${SHORT_DURATION} \
+      -shortest \
+      "${shortOutput}" 2>/dev/null`,
+    { stdio: "pipe" }
+  );
+
+  const outputSize = fs.existsSync(shortOutput) ? fs.statSync(shortOutput).size : 0;
+  if (outputSize < 100000) throw new Error(`Short assembly failed (${outputSize} bytes)`);
+
+  log(`Short assembled (${SHORT_DURATION}s vertical)`, "ok");
+  return shortOutput;
+}
+
+// ─── SHORT: UPLOAD ────────────────────────────────────────────────────────────
+
+async function uploadShort(shortPath, metadata, longFormVideoId, publishTime) {
+  assert(KEYS.youtube, "Missing YT token for Short upload");
+  log("Uploading Short to YouTube...");
+
+  const shortDescription =
+    `${metadata.summary || ""}
+
+` +
+    `Watch the full video: https://youtube.com/watch?v=${longFormVideoId}
+
+` +
+    `New videos every day. Subscribe: https://youtube.com/@TurnsOutSci
+
+` +
+    `#Shorts #Science #${metadata.tags?.[0] || "ScienceShorts"}`;
+
+  const shortTags = [...(metadata.tags || []), "Shorts", "ScienceShorts", "LearnOnYouTube"];
+
+  const videoBuffer = fs.readFileSync(shortPath);
+  const boundary = "turns_out_short_boundary_" + Date.now();
+
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      JSON.stringify({
+        snippet: {
+          title: metadata.shortTitle + " #Shorts",
+          description: shortDescription,
+          tags: shortTags,
+          categoryId: "28",
+          defaultLanguage: "en",
+        },
+        status: {
+          privacyStatus: "private",
+          publishAt: publishTime,
+          selfDeclaredMadeForKids: false,
+        },
+      }) +
+      `\r\n--${boundary}\r\n` +
+      `Content-Type: video/mp4\r\n\r\n`
+    ),
+    videoBuffer,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+
+  const response = await new Promise((resolve, reject) => {
+    const req = https.request(
+      "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${KEYS.youtube}`,
+          "Content-Type": `multipart/related; boundary=${boundary}`,
+          "Content-Length": body.length,
+        },
+      },
+      (res) => {
+        let d = "";
+        res.on("data", (c) => (d += c));
+        res.on("end", () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(d) }); }
+          catch { resolve({ status: res.statusCode, body: d }); }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+
+  if (response.status === 200 || response.status === 201) {
+    const shortId = response.body?.id;
+    log(`Short uploaded! ID: ${shortId}`, "ok");
+    log(`Short URL: https://youtube.com/shorts/${shortId}`, "ok");
+    return shortId;
+  } else {
+    log(`Short upload failed (${response.status}): ${JSON.stringify(response.body)}`, "err");
+    throw new Error("Short upload failed");
+  }
+}
+
 async function main() {
   console.log("\n╔════════════════════════════════════════╗");
   console.log("║     Turns Out — Pipeline v2.0          ║");
@@ -796,6 +961,17 @@ async function main() {
     const videoId   = await uploadToYouTube(video, metadata, publishAt);
     await uploadThumbnail(videoId, thumb);
 
+    // Generate and upload matching Short
+    log("\n── Generating matching Short ──");
+    try {
+      const shortVideo  = await assembleShort(audio, clips, metadata, topic);
+      const shortPublishAt = schedulePublishTime(); // same publish window
+      const shortId     = await uploadShort(shortVideo, metadata, videoId, shortPublishAt);
+      console.log(`   Short:      https://youtube.com/shorts/${shortId}`);
+    } catch (e) {
+      log(`Short generation failed: ${e.message} — continuing without Short`, "warn");
+    }
+
     const runLog = {
       timestamp: new Date().toISOString(),
       topic: topic.label,
@@ -805,6 +981,7 @@ async function main() {
       publishAt,
       wordCount: script.split(" ").length,
     };
+
     fs.writeFileSync(path.join(__dirname, `run_log_${Date.now()}.json`), JSON.stringify(runLog, null, 2));
 
     console.log("\n✅ Pipeline complete!");
