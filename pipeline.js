@@ -33,6 +33,8 @@ const CONFIG = {
     { label: "Food science",       query: "nutrition+diet+food+health+outcomes",  pexels: "healthy food" },
     { label: "Longevity & aging",  query: "longevity+aging+lifespan+senescence",  pexels: "aging health" },
   ],
+  // Playlist IDs — auto-created on first run if null, then cached in playlists.json
+  PLAYLIST_IDS: null,
 };
 
 const KEYS = {
@@ -541,9 +543,12 @@ async function assembleVideo(clipPaths, audioPath, title) {
   if (mainSize < 500000) {
     throw new Error(`Main video assembly failed (${mainSize} bytes). FFmpeg: ${ffmpegOutput.slice(-500)}`);
   }
-  const bumperPath = await buildBumper();
-  fs.writeFileSync(bumperConcatList, `file '${bumperPath}'\nfile '${mainPath}'\n`);
-  const totalDuration = CONFIG.BUMPER_DURATION + audioDuration;
+  // Build end card and bumper
+  const endCardPath = await buildEndCard();
+  const bumperPath  = await buildBumper();
+  // Order: bumper (3s) + main content + end card (20s)
+  fs.writeFileSync(bumperConcatList, `file '${bumperPath}'\nfile '${mainPath}'\nfile '${endCardPath}'\n`);
+  const totalDuration = CONFIG.BUMPER_DURATION + audioDuration + 20; // +20s end card
   execSync(
     `ffmpeg -y -f concat -safe 0 -i "${bumperConcatList}" -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k "${outputPath}" 2>/dev/null`,
     { stdio: "pipe" }
@@ -762,6 +767,123 @@ function cleanup() {
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 
+
+// ─── END CARD ─────────────────────────────────────────────────────────────────
+
+async function buildEndCard() {
+  log("Building end card (20s)...");
+
+  const endCardPath = path.join(TMP, "end_card.mp4");
+  const font        = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+  const duration    = 20;
+
+  // Dark navy background with brand text and subscribe prompt
+  // FFmpeg lavfi generates a solid color source
+  const vf = [
+    `drawbox=x=0:y=0:w=iw:h=ih:color=#0A0E1A:t=fill`,
+    `drawtext=fontfile='${font}':text='turns out':fontsize=80:fontcolor=#F5EDD8:x=(w-tw)/2:y=(h/2)-120:shadowcolor=black@0.5:shadowx=2:shadowy=2`,
+    `drawtext=fontfile='${font}':text='out':fontsize=80:fontcolor=#C17B2F:x=(w-tw)/2+230:y=(h/2)-120:shadowcolor=black@0.5:shadowx=2:shadowy=2`,
+    `drawtext=fontfile='${font}':text='Scientists have been busy.':fontsize=32:fontcolor=#8A7F6B:x=(w-tw)/2:y=(h/2)`,
+    `drawtext=fontfile='${font}':text='Subscribe for more.':fontsize=28:fontcolor=#C17B2F:x=(w-tw)/2:y=(h/2)+50`,
+  ].join(",");
+
+  execSync(
+    `ffmpeg -y -f lavfi -i "color=c=#0A0E1A:size=1920x1080:rate=30" -t ${duration} ` +
+    `-vf "${vf}" ` +
+    `-c:v libx264 -preset ultrafast -crf 23 ` +
+    `-af "anullsrc=r=44100:cl=stereo,atrim=duration=${duration}" ` +
+    `-c:a aac -b:a 128k "${endCardPath}" 2>/dev/null`,
+    { stdio: "pipe" }
+  );
+
+  log("End card built (20s)", "ok");
+  return endCardPath;
+}
+
+// ─── PLAYLISTS ────────────────────────────────────────────────────────────────
+
+async function getOrCreatePlaylist(topicLabel) {
+  const playlistTitle = `Turns Out: ${topicLabel}`;
+
+  // Search for existing playlist by title first
+  const searchUrl = `https://www.googleapis.com/youtube/v3/playlists?part=snippet&mine=true&maxResults=50`;
+  try {
+    const existing = await fetchJSON(searchUrl, {
+      headers: { Authorization: `Bearer ${KEYS.youtube}` },
+    });
+    const match = (existing.items || []).find(p => p.snippet?.title === playlistTitle);
+    if (match) {
+      log(`Playlist found for "${topicLabel}": ${match.id}`, "ok");
+      return match.id;
+    }
+  } catch (e) {
+    log(`Playlist search failed: ${e.message}`, "warn");
+  }
+
+  // Create new playlist for this topic
+  log(`Creating playlist for "${topicLabel}"...`);
+  const body = JSON.stringify({
+    snippet: {
+      title: `Turns Out: ${topicLabel}`,
+      description: `All Turns Out videos on ${topicLabel}. Real research, plain English. New video every day.`,
+      defaultLanguage: "en",
+    },
+    status: { privacyStatus: "public" },
+  });
+
+  const response = await fetchJSON(
+    "https://www.googleapis.com/youtube/v3/playlists?part=snippet,status",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${KEYS.youtube}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+      body,
+    }
+  );
+
+  if (!response.id) {
+    log(`Playlist creation failed: ${JSON.stringify(response)}`, "warn");
+    return null;
+  }
+
+  log(`Playlist created: ${response.id}`, "ok");
+  return response.id;
+}
+
+async function addVideoToPlaylist(videoId, playlistId) {
+  if (!playlistId) return;
+  log(`Adding video to playlist ${playlistId}...`);
+
+  const body = JSON.stringify({
+    snippet: {
+      playlistId,
+      resourceId: { kind: "youtube#video", videoId },
+    },
+  });
+
+  const response = await fetchJSON(
+    "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${KEYS.youtube}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+      body,
+    }
+  );
+
+  if (response.id) {
+    log("Video added to playlist", "ok");
+  } else {
+    log(`Playlist insert failed: ${JSON.stringify(response)}`, "warn");
+  }
+}
+
 // ─── SHORT: ASSEMBLE ─────────────────────────────────────────────────────────
 
 async function assembleShort(audioPath, clipPaths, metadata, topic) {
@@ -960,6 +1082,14 @@ async function main() {
     const publishAt = schedulePublishTime();
     const videoId   = await uploadToYouTube(video, metadata, publishAt);
     await uploadThumbnail(videoId, thumb);
+
+    // Add to topic playlist
+    try {
+      const playlistId = await getOrCreatePlaylist(topic.label);
+      await addVideoToPlaylist(videoId, playlistId);
+    } catch (e) {
+      log(`Playlist error: ${e.message} — continuing`, "warn");
+    }
 
     // Generate and upload matching Short
     log("\n── Generating matching Short ──");
