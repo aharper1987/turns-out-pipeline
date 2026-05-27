@@ -26,12 +26,20 @@ const CONFIG = {
   ASSETS_DIR: path.join(__dirname, "assets"),
   MUSIC_CREDIT: `Music: "Upbeat Inspiring Corporate" by Pro Tunes - Copyright Safe Music | https://freemusicarchive.org/music/pro-tunes/single/upbeat-inspiring-corporate-1/`,
   TOPICS: [
-    { label: "Cancer research",    query: "cancer+therapy+clinical+trial",        pexels: "laboratory science" },
-    { label: "Brain & dementia",   query: "dementia+alzheimer+cognitive+decline", pexels: "brain neuroscience" },
-    { label: "Fitness & health",   query: "exercise+health+fitness+metabolism",   pexels: "exercise fitness" },
-    { label: "Child psychology",   query: "child+psychology+development+behavior",pexels: "children learning" },
-    { label: "Food science",       query: "nutrition+diet+food+health+outcomes",  pexels: "healthy food" },
-    { label: "Longevity & aging",  query: "longevity+aging+lifespan+senescence",  pexels: "aging health" },
+    // Original health/biology topics — PubMed + Semantic Scholar
+    { label: "Cancer research",        query: "cancer+therapy+clinical+trial",              pexels: "laboratory science",    source: "pubmed" },
+    { label: "Brain & dementia",       query: "dementia+alzheimer+cognitive+decline",       pexels: "brain neuroscience",    source: "pubmed" },
+    { label: "Fitness & health",       query: "exercise+health+fitness+metabolism",         pexels: "exercise fitness",      source: "pubmed" },
+    { label: "Child psychology",       query: "child+psychology+development+behavior",      pexels: "children learning",     source: "pubmed" },
+    { label: "Food science",           query: "nutrition+diet+food+health+outcomes",        pexels: "healthy food",          source: "pubmed" },
+    { label: "Longevity & aging",      query: "longevity+aging+lifespan+senescence",        pexels: "aging health",          source: "pubmed" },
+    // New expanded topics
+    { label: "Behavioral economics",   query: "behavioral+economics+decision+bias",         pexels: "business decision",     source: "semantic" },
+    { label: "AI & machine learning",  query: "artificial+intelligence+machine+learning",   pexels: "computer technology",   source: "arxiv" },
+    { label: "Education science",      query: "learning+cognition+education+memory",        pexels: "classroom learning",    source: "semantic" },
+    { label: "Climate & environment",  query: "climate+change+environment+health+impact",   pexels: "nature environment",    source: "pubmed" },
+    { label: "Sleep science",          query: "sleep+circadian+rest+cognitive+performance", pexels: "sleeping person",       source: "pubmed" },
+    { label: "Mental health",          query: "anxiety+depression+mental+health+treatment", pexels: "mental wellness",       source: "pubmed" },
   ],
   // Playlist IDs — auto-created on first run if null, then cached in playlists.json
   PLAYLIST_IDS: null,
@@ -106,22 +114,39 @@ async function fetchPaperWithRetry() {
   for (let attempt = 0; attempt < CONFIG.TOPICS.length; attempt++) {
     const { topic, index } = pickTopic(tried);
     tried.push(index);
+    const preferredSource = topic.source || 'pubmed';
+
     try {
-      const paper = await fetchPaper(topic);
+      let paper;
+      if (preferredSource === 'arxiv') {
+        paper = await fetchPaperArxiv(topic);
+      } else if (preferredSource === 'semantic') {
+        paper = await fetchPaperSemanticScholar(topic);
+      } else {
+        paper = await fetchPaper(topic); // PubMed default
+      }
       return { paper, topic };
     } catch (e) {
-      log('PubMed failed for "' + topic.label + '": ' + e.message, "warn");
-      log("Falling back to Semantic Scholar...", "info");
-      try {
-        const paper = await fetchPaperSemanticScholar(topic);
-        return { paper, topic };
-      } catch (e2) {
-        log('Semantic Scholar also failed for "' + topic.label + '": ' + e2.message, "warn");
-        log("Trying next topic...", "info");
+      log('Primary source failed for "' + topic.label + '": ' + e.message, "warn");
+      // Fallback chain: try remaining sources
+      const fallbacks = ['pubmed', 'semantic', 'arxiv'].filter(s => s !== preferredSource);
+      let succeeded = false;
+      for (const fallback of fallbacks) {
+        try {
+          log('Trying ' + fallback + ' for "' + topic.label + '"...', "info");
+          let paper;
+          if (fallback === 'arxiv')    paper = await fetchPaperArxiv(topic);
+          else if (fallback === 'semantic') paper = await fetchPaperSemanticScholar(topic);
+          else                          paper = await fetchPaper(topic);
+          return { paper, topic };
+        } catch (e2) {
+          log(fallback + ' also failed: ' + e2.message, "warn");
+        }
       }
+      if (!succeeded) log('All sources failed for "' + topic.label + '" — trying next topic...', "warn");
     }
   }
-  throw new Error("All topics exhausted across PubMed and Semantic Scholar");
+  throw new Error("All topics exhausted across all sources");
 }
 
 function schedulePublishTime() {
@@ -216,6 +241,68 @@ async function fetchPaperSemanticScholar(topic) {
   return result;
 }
 
+
+// ─── STEP 1C: FETCH FROM ARXIV ────────────────────────────────────────────────
+
+async function fetchPaperArxiv(topic) {
+  log('Fetching from arXiv for: ' + topic.label);
+
+  const query = encodeURIComponent(topic.query.replace(/\+/g, ' '));
+  const url =
+    'http://export.arxiv.org/api/query' +
+    '?search_query=all:' + query +
+    '&sortBy=submittedDate&sortOrder=descending' +
+    '&max_results=10';
+
+  const xmlData = await new Promise((resolve, reject) => {
+    http.get(url, (res) => {
+      let d = '';
+      res.on('data', (c) => (d += c));
+      res.on('end', () => resolve(d));
+    }).on('error', reject);
+  });
+
+  // Parse arXiv Atom XML manually
+  const entries = xmlData.match(/<entry>([sS]*?)<\/entry>/g) || [];
+  if (!entries.length) throw new Error('No papers found on arXiv');
+
+  // Pick a random paper from top 5
+  const entry = entries[Math.floor(Math.random() * Math.min(entries.length, 5))];
+
+  const getTag = (tag) => {
+    const match = entry.match(new RegExp('<' + tag + '[^>]*>([\s\S]*?)<\/' + tag + '>'));
+    return match ? match[1].replace(/<[^>]+>/g, '').trim() : '';
+  };
+
+  const title   = getTag('title');
+  const summary = getTag('summary');
+  const id      = getTag('id');
+  const published = getTag('published');
+
+  const authors = [...entry.matchAll(/<name>([^<]+)<\/name>/g)]
+    .slice(0, 3)
+    .map(m => m[1])
+    .join(', ');
+
+  if (!title || !summary) throw new Error('Could not parse arXiv entry');
+
+  const result = {
+    pmid: id.split('/abs/').pop() || id,
+    title,
+    authors,
+    allAuthors: [],
+    affiliation: '',
+    journal: 'arXiv',
+    date: published.slice(0, 10),
+    abstract: summary.slice(0, 2000),
+    url: id,
+    doi: '',
+    source: 'arXiv',
+  };
+
+  log('Found (arXiv): "' + result.title.slice(0, 70) + '..."', 'ok');
+  return result;
+}
 // ─── STEP 2: GENERATE SCRIPT ─────────────────────────────────────────────────
 
 async function generateScript(paper, topic) {
