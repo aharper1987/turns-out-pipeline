@@ -1,7 +1,7 @@
 name: Turns Out Auto Pipeline
 on:
   schedule:
-    - cron: "0 11 * * *"
+    - cron: "0 12 * * *"
   workflow_dispatch:
 jobs:
   run-pipeline:
@@ -13,9 +13,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
       - name: Install FFmpeg
-        run: sudo apt-get install -y ffmpeg
+        run: |
+          sudo apt-get update --fix-missing
+          sudo apt-get install -y --fix-missing ffmpeg
       - name: Install dependencies
         run: npm install
       - name: Run pipeline
