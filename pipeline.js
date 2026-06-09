@@ -308,7 +308,7 @@ async function fetchPaperArxiv(topic) {
 async function generateScript(paper, topic) {
   assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
   log("Generating script via Claude Haiku...");
-  const prompt = `You are writing a YouTube script for "Turns Out" — a science channel that explains real research in plain English for a general audience. The tone is witty, slightly quirky, and genuinely curious. Never dumbed down, never dry.
+  const prompt = `You are writing a YouTube script for "Turns Out" — a science channel that explains real research in plain, energetic English for a general audience. The tone is sharp, curious, and a little irreverent. Never dry. Never slow. Never boring.
 
 Study title: ${paper.title}
 Authors: ${paper.authors}${paper.affiliation ? `\nInstitution: ${paper.affiliation}` : ""}
@@ -317,25 +317,33 @@ Published: ${paper.date}
 Abstract: ${paper.abstract}
 Topic category: ${topic.label}
 
-Write a detailed 10-minute video script (approximately 1,400 words) that follows this exact structure:
+Write a punchy 10-minute video script (approximately 1,400 words). Follow this structure exactly:
 
-1. COLD OPEN (100 words): Start mid-story with the most surprising or counterintuitive implication of this research. No "hey guys" intros. No "Did you know." End with a question that makes them need to keep watching.
+1. COLD OPEN (100 words): Drop the audience into the most surprising or unsettling implication of this research — no setup, no "today we're covering," no "did you know." Start mid-thought, like a story already in progress. The first sentence must be a statement that makes someone stop scrolling. End the cold open with a single sharp question that makes them need to keep watching. No "hey guys." No preamble. Just the most interesting thing first.
 
-2. INTRO & CONTEXT (150 words): Zoom out. Why has this topic been studied? What did we think we knew before this study?
+2. CONTEXT (150 words): Now zoom out. What problem was science trying to solve here? What did we assume before this study existed? Keep it brisk — one short paragraph establishing stakes, one short paragraph on prior thinking. End with a one-sentence bridge that pulls them into the next section.
 
-3. THE RESEARCHERS (100 words): Introduce who did this work. Name the lead researchers, their institutions, when and where published. Make it feel human.
+3. RE-HOOK #1 — THE RESEARCHERS (100 words): Introduce who ran this study. Name the lead researchers, their institutions, when and where it was published. Make it feel human and interesting — these are real people who spent years on this. End this section with a forward-pull line: tease what they were about to find.
 
-4. THE STUDY EXPLAINED (200 words): Break down what researchers did. Who were the subjects? What was the methodology? Use one concrete real-world analogy.
+4. THE STUDY (200 words): Break down the methodology in plain language. Who were the subjects? What did researchers actually do? Use one concrete real-world analogy to make the method click. Keep sentences short. Keep it moving.
 
-5. THE FINDINGS (250 words): What did they find? Go result by result in plain English. Use analogies and scale to make numbers feel real. Be honest about effect sizes.
+5. RE-HOOK #2 — THE FINDINGS (250 words): The results. Go through them one by one in plain English. Use scale and analogy to make numbers feel real — don't just say "thirty percent higher," say what that actually means in a person's life. Be honest about effect sizes and what the study can and can't claim. End this section with a short punchy line that pivots toward implications.
 
-6. WHAT THIS MEANS (200 words): Connect findings to everyday life. Be practical. Address skepticism and limitations honestly.
+6. WHAT THIS MEANS (200 words): Connect findings to real everyday life. Be specific and practical. Then honestly address one or two limitations or reasons to be skeptical — this builds trust. End with a line that opens the door to the bigger picture.
 
-7. THE BIGGER PICTURE (200 words): Where does this fit in the wider field? What questions does it raise? What research should come next?
+7. RE-HOOK #3 — THE BIGGER PICTURE (200 words): Where does this sit in the wider field? What assumptions does it challenge? What important question does it raise that nobody has answered yet? Keep this section energetic — this is where curiosity peaks, not where it winds down.
 
-8. SIGN-OFF (100 words): Recap the single most mind-blowing takeaway. Raise one final provocative question. End with: "Turns out, scientists have been busy. And they're not done yet."
+8. SIGN-OFF (100 words): Land on the single most mind-blowing takeaway from the whole video. One short punchy sentence. Then raise one final provocative question the viewer will be thinking about after they close the tab. End with exactly this line: "Turns out, scientists have been busy. And they're not done yet."
 
-Write ONLY the script — no stage directions, no section labels, no markdown. Just the words to be spoken. Target 1,400 words.`;
+CRITICAL FORMATTING RULES:
+- Write ONLY the spoken words — no section labels, no stage directions, no markdown, no headers
+- Sentences must be short to medium length — maximum 20 words per sentence, aim for 12-15
+- Vary sentence length deliberately — short punchy sentences after longer ones create rhythm
+- Spell out all numbers and symbols for spoken audio: "twenty-three percent" not "23%", "and" not "&"
+- No bullet points, no lists — continuous flowing prose only
+- The re-hooks at sections 3, 5, and 7 should feel like natural pivots, not jarring interruptions
+- Target exactly 1,400 words — do not go below 1,100 or above 1,600`;
+
   const response = await fetchJSON("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -461,17 +469,51 @@ Respond ONLY with a JSON array of exactly 4 strings, no markdown:
 
 // ─── STEP 4: FETCH STOCK FOOTAGE ─────────────────────────────────────────────
 
+// ─── STEP 4A: FETCH FROM PIXABAY ─────────────────────────────────────────────
+
+async function fetchPixabayClips(searchTerm, count = 6) {
+  const apiKey = process.env.PIXABAY_API_KEY;
+  if (!apiKey) {
+    log("PIXABAY_API_KEY not set — skipping Pixabay", "warn");
+    return [];
+  }
+  try {
+    const url =
+      `https://pixabay.com/api/videos/?key=${apiKey}` +
+      `&q=${encodeURIComponent(searchTerm)}` +
+      `&video_type=film&per_page=${count + 3}&safesearch=true`;
+    const data = await fetchJSON(url);
+    const clips = (data.hits || [])
+      .map((v) => {
+        const file =
+          v.videos?.medium?.url ||
+          v.videos?.small?.url ||
+          v.videos?.large?.url;
+        return file;
+      })
+      .filter(Boolean)
+      .slice(0, count);
+    log(`  Pixabay: found ${clips.length} clips for "${searchTerm}"`, clips.length ? "ok" : "warn");
+    return clips;
+  } catch (e) {
+    log(`  Pixabay fetch failed for "${searchTerm}": ${e.message}`, "warn");
+    return [];
+  }
+}
+
 async function fetchFootage(topic, paper) {
   assert(KEYS.pexels, "Missing PEXELS_API_KEY");
 
   const searchTerms = await generateFootageSearchTerms(paper, topic);
-  const clipsPerTerm = Math.ceil(12 / searchTerms.length);
-  const allClips = [];
+  const TARGET_CLIPS = 24; // doubled from 12 — eliminates mid-video repeat
+  const clipsPerTerm = Math.ceil(TARGET_CLIPS / 2 / searchTerms.length); // split evenly between Pexels + Pixabay
+  const allClipUrls = [];
 
+  // ── Pexels ──
   for (const term of searchTerms) {
-    log(`  Searching footage: "${term}"...`);
+    log(`  Pexels: searching "${term}"...`);
     try {
-      const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(term)}&per_page=${clipsPerTerm + 2}&orientation=landscape&size=medium`;
+      const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(term)}&per_page=${clipsPerTerm + 3}&orientation=landscape&size=medium`;
       const data = await fetchJSON(url, { headers: { Authorization: KEYS.pexels } });
       const clips = (data.videos || [])
         .map((v) => {
@@ -483,31 +525,45 @@ async function fetchFootage(topic, paper) {
         })
         .filter(Boolean)
         .slice(0, clipsPerTerm);
-      allClips.push(...clips);
+      allClipUrls.push(...clips);
+      log(`  Pexels: ${clips.length} clips for "${term}"`, "ok");
     } catch (e) {
-      log(`  Search failed for "${term}" — skipping`, "warn");
+      log(`  Pexels failed for "${term}": ${e.message}`, "warn");
     }
   }
 
-  if (!allClips.length) {
-    log("All searches failed — falling back to topic default", "warn");
+  // ── Pixabay ──
+  for (const term of searchTerms) {
+    const pixabayClips = await fetchPixabayClips(term, clipsPerTerm);
+    allClipUrls.push(...pixabayClips);
+  }
+
+  // ── Fallback if both sources underperform ──
+  if (allClipUrls.length < 12) {
+    log("Combined sources returned fewer than 12 clips — running fallback on topic default", "warn");
     const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(topic.pexels)}&per_page=12&orientation=landscape&size=medium`;
     const data = await fetchJSON(url, { headers: { Authorization: KEYS.pexels } });
-    allClips.push(...(data.videos || []).map((v) => v.video_files?.[0]?.link).filter(Boolean));
+    allClipUrls.push(...(data.videos || []).map((v) => v.video_files?.[0]?.link).filter(Boolean));
   }
 
-  assert(allClips.length, "No footage found");
+  assert(allClipUrls.length, "No footage found from any source");
 
+  // Deduplicate URLs before downloading
+  const uniqueUrls = [...new Set(allClipUrls)].slice(0, TARGET_CLIPS);
   const paths = [];
-  const toDownload = allClips.slice(0, 12);
-  for (let i = 0; i < toDownload.length; i++) {
+
+  for (let i = 0; i < uniqueUrls.length; i++) {
     const dest = path.join(TMP, `clip_${i}.mp4`);
-    log(`  Downloading clip ${i + 1}/${toDownload.length}...`);
-    await fetchBinary(toDownload[i], dest);
-    paths.push(dest);
+    log(`  Downloading clip ${i + 1}/${uniqueUrls.length}...`);
+    try {
+      await fetchBinary(uniqueUrls[i], dest);
+      paths.push(dest);
+    } catch (e) {
+      log(`  Clip ${i + 1} download failed — skipping`, "warn");
+    }
   }
 
-  log(`Downloaded ${paths.length} clips across ${searchTerms.length} search terms`, "ok");
+  log(`Downloaded ${paths.length} clips across ${searchTerms.length} search terms (Pexels + Pixabay)`, "ok");
   return paths;
 }
 
