@@ -424,7 +424,7 @@ async function generateFootageSearchTerms(paper, topic) {
   assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
   log("Generating footage search terms...");
 
-  const prompt = `Given this science paper, generate 4 specific visual search terms for stock footage.
+  const prompt = `Given this science paper, generate 6 specific visual search terms for stock footage.
 
 Paper title: ${paper.title}
 Topic: ${topic.label}
@@ -436,8 +436,12 @@ Rules:
 - Varied — don't repeat the same visual theme
 - Avoid generic terms like "science laboratory" every time
 
-Respond ONLY with a JSON array of exactly 4 strings, no markdown:
-["term one", "term two", "term three", "term four"]`;
+- Every term must be distinctly different — no two terms should produce similar footage
+- Avoid generic terms like "science laboratory" or "medical research" unless highly specific
+- Think about the full arc of the video — terms should cover the topic from multiple visual angles
+
+Respond ONLY with a JSON array of exactly 6 strings, no markdown:
+["term one", "term two", "term three", "term four", "term five", "term six"]`;
 
   const response = await fetchJSON("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -448,7 +452,7 @@ Respond ONLY with a JSON array of exactly 4 strings, no markdown:
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 100,
+      max_tokens: 150,
       messages: [{ role: "user", content: prompt }],
     }),
   });
