@@ -432,10 +432,7 @@ Topic: ${topic.label}
 Rules:
 - Each term 2-3 words max
 - Visually concrete and filmable
-- Mix close-up scientific visuals with broader human/lifestyle scenes
-- Varied — don't repeat the same visual theme
-- Avoid generic terms like "science laboratory" every time
-
+- Mix of: close-up scientific visuals, human lifestyle scenes, nature/environment, abstract/conceptual
 - Every term must be distinctly different — no two terms should produce similar footage
 - Avoid generic terms like "science laboratory" or "medical research" unless highly specific
 - Think about the full arc of the video — terms should cover the topic from multiple visual angles
