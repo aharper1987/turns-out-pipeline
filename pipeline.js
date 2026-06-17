@@ -1041,8 +1041,8 @@ async function assembleShort(audioPath, clipPaths, metadata, topic) {
   const font           = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
   // Trim audio to 55 seconds
-  execSync(
-    `ffmpeg -y -i "${audioPath}" -t ${SHORT_DURATION} -c:a aac -b:a 128k "${shortAudio}" 2>/dev/null`,
+ execSync(
+    `ffmpeg -y -i "${audioPath}" -t ${SHORT_DURATION} -c:a aac -b:a 128k "${shortAudio}"`,
     { stdio: "pipe" }
   );
 
