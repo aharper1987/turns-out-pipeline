@@ -1041,10 +1041,15 @@ async function assembleShort(audioPath, clipPaths, metadata, topic) {
   const font           = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
   // Trim audio to 55 seconds
- execSync(
-    `ffmpeg -y -i "${audioPath}" -t ${SHORT_DURATION} -c:a aac -b:a 128k "${shortAudio}"`,
-    { stdio: "pipe" }
-  );
+  try {
+    execSync(
+      `ffmpeg -y -i "${audioPath}" -t ${SHORT_DURATION} -c:a aac -b:a 128k "${shortAudio}"`,
+      { stdio: "pipe" }
+    );
+  } catch (e) {
+    log(`FFmpeg stderr (audio trim): ${e.stderr?.toString().slice(-1000)}`, "warn");
+    throw e;
+  }
 
   // Use first available normalized clip as base (already 1920x1080)
   const baseClip = clipPaths[0];
