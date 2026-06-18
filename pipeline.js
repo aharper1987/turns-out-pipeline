@@ -26,14 +26,12 @@ const CONFIG = {
   ASSETS_DIR: path.join(__dirname, "assets"),
   MUSIC_CREDIT: `Music: "Upbeat Inspiring Corporate" by Pro Tunes - Copyright Safe Music | https://freemusicarchive.org/music/pro-tunes/single/upbeat-inspiring-corporate-1/`,
   TOPICS: [
-    // Original health/biology topics — PubMed + Semantic Scholar
     { label: "Cancer research",        query: "cancer+therapy+clinical+trial",              pexels: "laboratory science",    source: "pubmed" },
     { label: "Brain & dementia",       query: "dementia+alzheimer+cognitive+decline",       pexels: "brain neuroscience",    source: "pubmed" },
     { label: "Fitness & health",       query: "exercise+health+fitness+metabolism",         pexels: "exercise fitness",      source: "pubmed" },
     { label: "Child psychology",       query: "child+psychology+development+behavior",      pexels: "children learning",     source: "pubmed" },
     { label: "Food science",           query: "nutrition+diet+food+health+outcomes",        pexels: "healthy food",          source: "pubmed" },
     { label: "Longevity & aging",      query: "longevity+aging+lifespan+senescence",        pexels: "aging health",          source: "pubmed" },
-    // New expanded topics
     { label: "Behavioral economics",   query: "behavioral+economics+decision+bias",         pexels: "business decision",     source: "semantic" },
     { label: "AI & machine learning",  query: "artificial+intelligence+machine+learning",   pexels: "computer technology",   source: "arxiv" },
     { label: "Education science",      query: "learning+cognition+education+memory",        pexels: "classroom learning",    source: "semantic" },
@@ -41,7 +39,6 @@ const CONFIG = {
     { label: "Sleep science",          query: "sleep+circadian+rest+cognitive+performance", pexels: "sleeping person",       source: "pubmed" },
     { label: "Mental health",          query: "anxiety+depression+mental+health+treatment", pexels: "mental wellness",       source: "pubmed" },
   ],
-  // Playlist IDs — auto-created on first run if null, then cached in playlists.json
   PLAYLIST_IDS: null,
 };
 
@@ -123,12 +120,11 @@ async function fetchPaperWithRetry() {
       } else if (preferredSource === 'semantic') {
         paper = await fetchPaperSemanticScholar(topic);
       } else {
-        paper = await fetchPaper(topic); // PubMed default
+        paper = await fetchPaper(topic);
       }
       return { paper, topic };
     } catch (e) {
       log('Primary source failed for "' + topic.label + '": ' + e.message, "warn");
-      // Fallback chain: try remaining sources
       const fallbacks = ['pubmed', 'semantic', 'arxiv'].filter(s => s !== preferredSource);
       let succeeded = false;
       for (const fallback of fallbacks) {
@@ -241,7 +237,6 @@ async function fetchPaperSemanticScholar(topic) {
   return result;
 }
 
-
 // ─── STEP 1C: FETCH FROM ARXIV ────────────────────────────────────────────────
 
 async function fetchPaperArxiv(topic) {
@@ -262,15 +257,13 @@ async function fetchPaperArxiv(topic) {
     }).on('error', reject);
   });
 
-  // Parse arXiv Atom XML manually
-  const entries = xmlData.match(/<entry>([sS]*?)<\/entry>/g) || [];
+  const entries = xmlData.match(/<entry>([\s\S]*?)<\/entry>/g) || [];
   if (!entries.length) throw new Error('No papers found on arXiv');
 
-  // Pick a random paper from top 5
   const entry = entries[Math.floor(Math.random() * Math.min(entries.length, 5))];
 
   const getTag = (tag) => {
-    const match = entry.match(new RegExp('<' + tag + '[^>]*>([\s\S]*?)<\/' + tag + '>'));
+    const match = entry.match(new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)<\\/' + tag + '>'));
     return match ? match[1].replace(/<[^>]+>/g, '').trim() : '';
   };
 
@@ -303,6 +296,7 @@ async function fetchPaperArxiv(topic) {
   log('Found (arXiv): "' + result.title.slice(0, 70) + '..."', 'ok');
   return result;
 }
+
 // ─── STEP 2: GENERATE SCRIPT ─────────────────────────────────────────────────
 
 async function generateScript(paper, topic) {
@@ -468,8 +462,6 @@ Respond ONLY with a JSON array of exactly 6 strings, no markdown:
   return [topic.pexels];
 }
 
-// ─── STEP 4: FETCH STOCK FOOTAGE ─────────────────────────────────────────────
-
 // ─── STEP 4A: FETCH FROM PIXABAY ─────────────────────────────────────────────
 
 async function fetchPixabayClips(searchTerm, count = 6) {
@@ -502,15 +494,16 @@ async function fetchPixabayClips(searchTerm, count = 6) {
   }
 }
 
+// ─── STEP 4: FETCH STOCK FOOTAGE ─────────────────────────────────────────────
+
 async function fetchFootage(topic, paper) {
   assert(KEYS.pexels, "Missing PEXELS_API_KEY");
 
   const searchTerms = await generateFootageSearchTerms(paper, topic);
-  const TARGET_CLIPS = 24; // doubled from 12 — eliminates mid-video repeat
-  const clipsPerTerm = Math.ceil(TARGET_CLIPS / 2 / searchTerms.length); // split evenly between Pexels + Pixabay
+  const TARGET_CLIPS = 24;
+  const clipsPerTerm = Math.ceil(TARGET_CLIPS / 2 / searchTerms.length);
   const allClipUrls = [];
 
-  // ── Pexels ──
   for (const term of searchTerms) {
     log(`  Pexels: searching "${term}"...`);
     try {
@@ -533,13 +526,11 @@ async function fetchFootage(topic, paper) {
     }
   }
 
-  // ── Pixabay ──
   for (const term of searchTerms) {
     const pixabayClips = await fetchPixabayClips(term, clipsPerTerm);
     allClipUrls.push(...pixabayClips);
   }
 
-  // ── Fallback if both sources underperform ──
   if (allClipUrls.length < 12) {
     log("Combined sources returned fewer than 12 clips — running fallback on topic default", "warn");
     const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(topic.pexels)}&per_page=12&orientation=landscape&size=medium`;
@@ -549,7 +540,6 @@ async function fetchFootage(topic, paper) {
 
   assert(allClipUrls.length, "No footage found from any source");
 
-  // Deduplicate URLs before downloading
   const uniqueUrls = [...new Set(allClipUrls)].slice(0, TARGET_CLIPS);
   const paths = [];
 
@@ -635,7 +625,6 @@ async function assembleVideo(clipPaths, audioPath, title) {
   const mainPath         = path.join(TMP, "main.mp4");
   const outputPath       = path.join(TMP, "final.mp4");
   const concatList       = path.join(TMP, "concat.txt");
-  const loopedFootage    = path.join(TMP, "footage_loop.mp4");
   const scaledFootage    = path.join(TMP, "footage_scaled.mp4");
   const bumperConcatList = path.join(TMP, "bumper_concat.txt");
   const audioDuration = parseFloat(
@@ -645,8 +634,6 @@ async function assembleVideo(clipPaths, audioPath, title) {
   );
   log(`  Audio duration: ${audioDuration.toFixed(1)}s`);
 
-  // Normalize each clip individually to consistent codec/fps/resolution
-  // This is fast per-clip and allows instant -c copy concat afterward
   const normalizedPaths = [];
   for (let i = 0; i < clipPaths.length; i++) {
     const normPath = path.join(TMP, `norm_${i}.mp4`);
@@ -658,7 +645,6 @@ async function assembleVideo(clipPaths, audioPath, title) {
   }
   log(`  Normalized ${normalizedPaths.length} clips`);
 
-  // Build concat list — repeat normalized clips to cover full audio duration
   let concatContent = "";
   for (const p of normalizedPaths) concatContent += `file '${p}'\n`;
   const repeats = Math.ceil(audioDuration / (normalizedPaths.length * 4)) + 2;
@@ -666,7 +652,6 @@ async function assembleVideo(clipPaths, audioPath, title) {
   for (let i = 0; i < repeats; i++) fullContent += concatContent;
   fs.writeFileSync(concatList, fullContent);
 
-  // Concat with -c copy (instant) then trim to exact audio duration
   execSync(
     `ffmpeg -y -f concat -safe 0 -i "${concatList}" -t ${audioDuration} -c copy "${scaledFootage}" 2>/dev/null`,
     { stdio: "pipe" }
@@ -687,12 +672,9 @@ async function assembleVideo(clipPaths, audioPath, title) {
   if (mainSize < 500000) {
     throw new Error(`Main video assembly failed (${mainSize} bytes). FFmpeg: ${ffmpegOutput.slice(-500)}`);
   }
-  // Build end card and bumper
   const endCardPath = await buildEndCard();
   const bumperPath  = await buildBumper();
-  // Order: bumper (3s) + main content + end card (20s)
   fs.writeFileSync(bumperConcatList, `file '${bumperPath}'\nfile '${mainPath}'\nfile '${endCardPath}'\n`);
-  const totalDuration = CONFIG.BUMPER_DURATION + audioDuration + 20; // +20s end card
   execSync(
     `ffmpeg -y -f concat -safe 0 -i "${bumperConcatList}" -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k "${outputPath}" 2>/dev/null`,
     { stdio: "pipe" }
@@ -702,8 +684,7 @@ async function assembleVideo(clipPaths, audioPath, title) {
     throw new Error(`Final concat failed (${outputSize} bytes)`);
   }
 
-  // Hard trim — guarantee final video never exceeds 12 minutes regardless of assembly drift
-  const MAX_DURATION = 720; // 12 minutes
+  const MAX_DURATION = 720;
   const finalDuration = parseFloat(
     execSync(
       `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputPath}"`
@@ -908,10 +889,6 @@ function cleanup() {
   fs.mkdirSync(TMP, { recursive: true });
 }
 
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
-
-
-
 // ─── END CARD ─────────────────────────────────────────────────────────────────
 
 async function buildEndCard() {
@@ -921,8 +898,6 @@ async function buildEndCard() {
   const font        = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
   const duration    = 20;
 
-  // Dark navy background with brand text and subscribe prompt
-  // FFmpeg lavfi generates a solid color source
   const vf = [
     `drawbox=x=0:y=0:w=iw:h=ih:color=#0A0E1A:t=fill`,
     `drawtext=fontfile='${font}':text='turns out':fontsize=80:fontcolor=#F5EDD8:x=(w-tw)/2:y=(h/2)-120:shadowcolor=black@0.5:shadowx=2:shadowy=2`,
@@ -949,7 +924,6 @@ async function buildEndCard() {
 async function getOrCreatePlaylist(topicLabel) {
   const playlistTitle = `Turns Out: ${topicLabel}`;
 
-  // Search for existing playlist by title first
   const searchUrl = `https://www.googleapis.com/youtube/v3/playlists?part=snippet&mine=true&maxResults=50`;
   try {
     const existing = await fetchJSON(searchUrl, {
@@ -964,7 +938,6 @@ async function getOrCreatePlaylist(topicLabel) {
     log(`Playlist search failed: ${e.message}`, "warn");
   }
 
-  // Create new playlist for this topic
   log(`Creating playlist for "${topicLabel}"...`);
   const body = JSON.stringify({
     snippet: {
@@ -1033,14 +1006,13 @@ async function addVideoToPlaylist(videoId, playlistId) {
 async function assembleShort(audioPath, clipPaths, metadata, topic) {
   log("Assembling Short (vertical 9:16, 55s)...");
 
-  const SHORT_DURATION = 55; // seconds — safely under 60s YouTube Shorts limit
+  const SHORT_DURATION = 55;
   const shortAudio     = path.join(TMP, "short_audio.mp3");
   const shortClip      = path.join(TMP, "short_clip.mp4");
   const shortScaled    = path.join(TMP, "short_scaled.mp4");
   const shortOutput    = path.join(TMP, "short_final.mp4");
   const font           = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
-  // Trim audio to 55 seconds
   try {
     execSync(
       `ffmpeg -y -i "${audioPath}" -t ${SHORT_DURATION} -c:a aac -b:a 128k "${shortAudio}"`,
@@ -1051,23 +1023,18 @@ async function assembleShort(audioPath, clipPaths, metadata, topic) {
     throw e;
   }
 
-  // Use first available normalized clip as base (already 1920x1080)
   const baseClip = clipPaths[0];
 
-  // Trim clip to 55 seconds
   execSync(
     `ffmpeg -y -i "${baseClip}" -t ${SHORT_DURATION} -c copy "${shortClip}" 2>/dev/null`,
     { stdio: "pipe" }
   );
 
-  // Crop 1920x1080 to vertical 608x1080 (9:16), then scale to 1080x1920
-  // Crop from center: x=(1920-608)/2=656
   execSync(
     `ffmpeg -y -i "${shortClip}" -vf "crop=608:1080:656:0,scale=1080:1920" -c:v libx264 -preset ultrafast -crf 23 "${shortScaled}" 2>/dev/null`,
     { stdio: "pipe" }
   );
 
-  // Build title overlay for Short — large centered text, topic pill, brand mark
   const safeTitle = metadata.shortTitle.replace(/['"\\:]/g, " ").trim();
   const words = safeTitle.split(" ");
   let line1 = "", line2 = "", line3 = "";
@@ -1082,23 +1049,16 @@ async function assembleShort(audioPath, clipPaths, metadata, topic) {
   }
   const topicLabel = topic.label.toUpperCase().replace(/['"\\]/g, "");
 
-  // For Shorts: 1080x1920 canvas
-  // Title centered vertically in top third, topic pill at top, brand at bottom
   let vf = [
-    // Dark scrim across top third for title legibility
     `drawbox=x=0:y=0:w=iw:h=700:color=#1A1610@0.75:t=fill`,
-    // Topic pill top-center
     `drawbox=x=(iw-240)/2:y=40:w=240:h=44:color=#C17B2F@1.0:t=fill`,
     `drawtext=fontfile='${font}':text='${topicLabel}':fontsize=20:fontcolor=#1A1610:x=(w-tw)/2:y=50`,
-    // Title lines centered
     `drawtext=fontfile='${font}':text='${line1}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=150:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
   ];
   if (line2) vf.push(`drawtext=fontfile='${font}':text='${line2}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=230:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
   if (line3) vf.push(`drawtext=fontfile='${font}':text='${line3}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=310:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
-  // Brand mark bottom
   vf.push(`drawtext=fontfile='${font}':text='TURNS OUT':fontsize=22:fontcolor=#8A7F6B:x=(w-tw)/2:y=h-60`);
 
-  // Combine vertical video + trimmed audio + text overlay
   execSync(
     `ffmpeg -y \
       -i "${shortScaled}" \
@@ -1127,15 +1087,9 @@ async function uploadShort(shortPath, metadata, longFormVideoId, publishTime) {
   log("Uploading Short to YouTube...");
 
   const shortDescription =
-    `${metadata.summary || ""}
-
-` +
-    `Watch the full video: https://youtube.com/watch?v=${longFormVideoId}
-
-` +
-    `New videos every day. Subscribe: https://youtube.com/@TurnsOutSci
-
-` +
+    `${metadata.summary || ""}\n\n` +
+    `Watch the full video: https://youtube.com/watch?v=${longFormVideoId}\n\n` +
+    `New videos every day. Subscribe: https://youtube.com/@TurnsOutSci\n\n` +
     `#Shorts #Science #${metadata.tags?.[0] || "ScienceShorts"}`;
 
   const shortTags = [...(metadata.tags || []), "Shorts", "ScienceShorts", "LearnOnYouTube"];
@@ -1206,7 +1160,7 @@ async function uploadShort(shortPath, metadata, longFormVideoId, publishTime) {
 
 async function main() {
   console.log("\n╔════════════════════════════════════════╗");
-  console.log("║     Turns Out — Pipeline v2.0          ║");
+  console.log("║     Turns Out — Pipeline v2.1          ║");
   console.log("║     @TurnsOutSci                       ║");
   console.log(`║     ${new Date().toISOString().slice(0, 10)}                       ║`);
   console.log("╚════════════════════════════════════════╝\n");
@@ -1232,7 +1186,6 @@ async function main() {
     const videoId   = await uploadToYouTube(video, metadata, publishAt);
     await uploadThumbnail(videoId, thumb);
 
-    // Add to topic playlist
     try {
       const playlistId = await getOrCreatePlaylist(topic.label);
       await addVideoToPlaylist(videoId, playlistId);
@@ -1240,11 +1193,10 @@ async function main() {
       log(`Playlist error: ${e.message} — continuing`, "warn");
     }
 
-    // Generate and upload matching Short
     log("\n── Generating matching Short ──");
     try {
       const shortVideo  = await assembleShort(audio, clips, metadata, topic);
-      const shortPublishAt = schedulePublishTime(); // same publish window
+      const shortPublishAt = schedulePublishTime();
       const shortId     = await uploadShort(shortVideo, metadata, videoId, shortPublishAt);
       console.log(`   Short:      https://youtube.com/shorts/${shortId}`);
     } catch (e) {
