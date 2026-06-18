@@ -16,8 +16,8 @@ jobs:
           node-version: "24"
       - name: Install FFmpeg
         run: |
-          sudo apt-get update --fix-missing
-          sudo apt-get install -y --fix-missing ffmpeg
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
       - name: Install dependencies
         run: npm install
       - name: Run pipeline
