@@ -1007,7 +1007,7 @@ async function assembleShort(audioPath, clipPaths, metadata, topic) {
   log("Assembling Short (vertical 9:16, 55s)...");
 
   const SHORT_DURATION = 55;
-  const shortAudio     = path.join(TMP, "short_audio.mp3");
+  const shortAudio     = path.join(TMP, "short_audio.aac");
   const shortClip      = path.join(TMP, "short_clip.mp4");
   const shortScaled    = path.join(TMP, "short_scaled.mp4");
   const shortOutput    = path.join(TMP, "short_final.mp4");
