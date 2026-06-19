@@ -1001,45 +1001,126 @@ async function addVideoToPlaylist(videoId, playlistId) {
   }
 }
 
+// ─── SHORT: GENERATE SCRIPT ───────────────────────────────────────────────────
+
+async function generateShortScript(paper, topic) {
+  assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
+  log("Generating Short script...");
+
+  const prompt = `You are writing a YouTube Shorts script for "Turns Out" — a science channel. The tone is sharp, fast, and irreverent.
+
+Study title: ${paper.title}
+Topic: ${topic.label}
+Abstract: ${paper.abstract}
+
+Write a self-contained, punchy script of approximately 130 words that:
+- Opens with the single most surprising finding — no setup, no "today we're talking about"
+- Delivers 2-3 concrete details from the study in plain English
+- Must work as a STANDALONE piece — the viewer has not seen the long-form video
+- Ends with exactly this line as the final sentence: "Full breakdown is one tap away."
+
+CRITICAL FORMATTING RULES:
+- Write ONLY the spoken words — no labels, no markdown
+- Short, punchy sentences — max 15 words each
+- Spell out numbers and symbols for spoken audio
+- Target exactly 130 words — do not go below 110 or above 150`;
+
+  const response = await fetchJSON("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": KEYS.anthropic,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 400,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  const script = response.content?.[0]?.text;
+  assert(script, "Short script generation failed");
+  const wordCount = script.split(" ").length;
+  log(`Short script generated (${wordCount} words)`, "ok");
+  return script;
+}
+
 // ─── SHORT: ASSEMBLE ─────────────────────────────────────────────────────────
 
-async function assembleShort(audioPath, clipPaths, metadata, topic) {
-  log("Assembling Short (vertical 9:16, 55s)...");
+async function assembleShort(clipPaths, metadata, topic, paper) {
+  log("Assembling Short (vertical 9:16)...");
 
-  const SHORT_DURATION = 55;
   const shortAudio     = path.join(TMP, "short_audio.aac");
-  const shortClip      = path.join(TMP, "short_clip.mp4");
-  const shortScaled    = path.join(TMP, "short_scaled.mp4");
+  const shortConcat    = path.join(TMP, "short_concat.txt");
+  const shortFootage   = path.join(TMP, "short_footage.mp4");
   const shortOutput    = path.join(TMP, "short_final.mp4");
   const font           = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
-  try {
-    execSync(
-      `ffmpeg -y -i "${audioPath}" -t ${SHORT_DURATION} -c:a aac -b:a 128k "${shortAudio}"`,
-      { stdio: "pipe" }
-    );
-  } catch (e) {
-    log(`FFmpeg stderr (audio trim): ${e.stderr?.toString().slice(-1000)}`, "warn");
-    throw e;
-  }
+  // Step 1: Generate dedicated short script + voiceover
+  const shortScript = await generateShortScript(paper, topic);
+  assert(KEYS.elevenlabs, "Missing ELEVENLABS_API_KEY");
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${CONFIG.ELEVENLABS_VOICE_ID}`;
+  await new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      text: shortScript,
+      model_id: "eleven_turbo_v2_5",
+      voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.2 },
+    });
+    const req = https.request(url, {
+      method: "POST",
+      headers: {
+        "xi-api-key": KEYS.elevenlabs,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (res) => {
+      assert(res.statusCode === 200, `ElevenLabs error: ${res.statusCode}`);
+      const file = fs.createWriteStream(shortAudio);
+      res.pipe(file);
+      file.on("finish", () => { file.close(); resolve(); });
+      file.on("error", reject);
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
 
-  const baseClip = clipPaths[0];
+  const audioDuration = parseFloat(
+    execSync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${shortAudio}"`
+    ).toString().trim()
+  );
+  log(`  Short audio duration: ${audioDuration.toFixed(1)}s`);
+
+  // Step 2: Build vertical clips, looped to cover full audio
+  const verticalClips = [];
+  for (let i = 0; i < clipPaths.length; i++) {
+    const vPath = path.join(TMP, `short_clip_${i}.mp4`);
+    try {
+      execSync(
+        `ffmpeg -y -i "${clipPaths[i]}" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=608:1080:656:0,scale=1080:1920,fps=30" -c:v libx264 -preset ultrafast -crf 23 -an "${vPath}" 2>/dev/null`,
+        { stdio: "pipe" }
+      );
+      verticalClips.push(vPath);
+    } catch (e) {
+      log(`  Skipping clip ${i} for Short (conversion failed)`, "warn");
+    }
+  }
+  assert(verticalClips.length, "No usable clips for Short");
+
+  let concatContent = "";
+  for (const p of verticalClips) concatContent += `file '${p}'\n`;
+  const repeats = Math.ceil(audioDuration / (verticalClips.length * 4)) + 2;
+  let fullContent = "";
+  for (let i = 0; i < repeats; i++) fullContent += concatContent;
+  fs.writeFileSync(shortConcat, fullContent);
 
   execSync(
-    `ffmpeg -y -i "${baseClip}" -t ${SHORT_DURATION} -c copy "${shortClip}" 2>/dev/null`,
+    `ffmpeg -y -f concat -safe 0 -i "${shortConcat}" -t ${audioDuration} -c copy "${shortFootage}" 2>/dev/null`,
     { stdio: "pipe" }
   );
 
-  try {
-    execSync(
-      `ffmpeg -y -i "${shortClip}" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=608:1080:656:0,scale=1080:1920" -c:v libx264 -preset ultrafast -crf 23 "${shortScaled}"`,
-      { stdio: "pipe" }
-    );
-  } catch (e) {
-    log(`FFmpeg stderr (crop/scale): ${e.stderr?.toString().slice(-1000)}`, "warn");
-    throw e;
-  }
-
+  // Step 3: Title overlay + end-screen callout
   const safeTitle = metadata.shortTitle.replace(/['"\\:]/g, " ").trim();
   const words = safeTitle.split(" ");
   let line1 = "", line2 = "", line3 = "";
@@ -1063,28 +1144,32 @@ async function assembleShort(audioPath, clipPaths, metadata, topic) {
   if (line2) vf.push(`drawtext=fontfile='${font}':text='${line2}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=230:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
   if (line3) vf.push(`drawtext=fontfile='${font}':text='${line3}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=310:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
   vf.push(`drawtext=fontfile='${font}':text='TURNS OUT':fontsize=22:fontcolor=#8A7F6B:x=(w-tw)/2:y=h-60`);
+  vf.push(`drawtext=fontfile='${font}':text='Full video on channel':fontsize=24:fontcolor=#C17B2F:x=(w-tw)/2:y=h-110:enable='gte(t,${(audioDuration - 4).toFixed(1)})'`);
 
-  execSync(
-    `ffmpeg -y \
-      -i "${shortScaled}" \
-      -i "${shortAudio}" \
-      -map 0:v:0 -map 1:a:0 \
-      -vf "${vf.join(",")}" \
-      -c:v libx264 -preset ultrafast -crf 22 \
-      -c:a aac -b:a 128k \
-      -t ${SHORT_DURATION} \
-      -shortest \
-      "${shortOutput}" 2>/dev/null`,
-    { stdio: "pipe" }
-  );
+  try {
+    execSync(
+      `ffmpeg -y \
+        -i "${shortFootage}" \
+        -i "${shortAudio}" \
+        -map 0:v:0 -map 1:a:0 \
+        -vf "${vf.join(",")}" \
+        -c:v libx264 -preset ultrafast -crf 22 \
+        -c:a aac -b:a 128k \
+        -shortest \
+        "${shortOutput}"`,
+      { stdio: "pipe" }
+    );
+  } catch (e) {
+    log(`FFmpeg stderr (final short assembly): ${e.stderr?.toString().slice(-1000)}`, "warn");
+    throw e;
+  }
 
   const outputSize = fs.existsSync(shortOutput) ? fs.statSync(shortOutput).size : 0;
   if (outputSize < 100000) throw new Error(`Short assembly failed (${outputSize} bytes)`);
 
-  log(`Short assembled (${SHORT_DURATION}s vertical)`, "ok");
-  return shortOutput;
+  log(`Short assembled (${audioDuration.toFixed(1)}s vertical)`, "ok");
+  return { shortPath: shortOutput, shortScript };
 }
-
 // ─── SHORT: UPLOAD ────────────────────────────────────────────────────────────
 
 async function uploadShort(shortPath, metadata, longFormVideoId, publishTime) {
@@ -1200,9 +1285,9 @@ async function main() {
 
     log("\n── Generating matching Short ──");
     try {
-      const shortVideo  = await assembleShort(audio, clips, metadata, topic);
-      const shortPublishAt = schedulePublishTime();
-      const shortId     = await uploadShort(shortVideo, metadata, videoId, shortPublishAt);
+      const { shortPath } = await assembleShort(clips, metadata, topic, paper);
+      const shortPublishAt = schedulePublishTime(); // same publish window
+      const shortId     = await uploadShort(shortPath, metadata, videoId, shortPublishAt);
       console.log(`   Short:      https://youtube.com/shorts/${shortId}`);
     } catch (e) {
       log(`Short generation failed: ${e.message} — continuing without Short`, "warn");
