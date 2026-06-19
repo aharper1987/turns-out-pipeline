@@ -1123,11 +1123,12 @@ async function assembleShort(clipPaths, metadata, topic, paper) {
   // Step 3: Title overlay + end-screen callout
   const safeTitle = metadata.shortTitle.replace(/['"\\:]/g, " ").trim();
   const words = safeTitle.split(" ");
+  const MAX_CHARS_PER_LINE = 13; // tuned for fontsize=64 on a 1080px-wide canvas with margin
   let line1 = "", line2 = "", line3 = "";
   for (const word of words) {
-    if ((line1 + " " + word).trim().length <= 18) {
+    if ((line1 + " " + word).trim().length <= MAX_CHARS_PER_LINE) {
       line1 = (line1 + " " + word).trim();
-    } else if ((line2 + " " + word).trim().length <= 18) {
+    } else if ((line2 + " " + word).trim().length <= MAX_CHARS_PER_LINE) {
       line2 = (line2 + " " + word).trim();
     } else {
       line3 = (line3 + " " + word).trim();
