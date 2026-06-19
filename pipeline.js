@@ -1030,10 +1030,15 @@ async function assembleShort(audioPath, clipPaths, metadata, topic) {
     { stdio: "pipe" }
   );
 
-  execSync(
-    `ffmpeg -y -i "${shortClip}" -vf "crop=608:1080:656:0,scale=1080:1920" -c:v libx264 -preset ultrafast -crf 23 "${shortScaled}" 2>/dev/null`,
-    { stdio: "pipe" }
-  );
+  try {
+    execSync(
+      `ffmpeg -y -i "${shortClip}" -vf "crop=608:1080:656:0,scale=1080:1920" -c:v libx264 -preset ultrafast -crf 23 "${shortScaled}"`,
+      { stdio: "pipe" }
+    );
+  } catch (e) {
+    log(`FFmpeg stderr (crop/scale): ${e.stderr?.toString().slice(-1000)}`, "warn");
+    throw e;
+  }
 
   const safeTitle = metadata.shortTitle.replace(/['"\\:]/g, " ").trim();
   const words = safeTitle.split(" ");
