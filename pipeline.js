@@ -1032,7 +1032,7 @@ async function assembleShort(audioPath, clipPaths, metadata, topic) {
 
   try {
     execSync(
-      `ffmpeg -y -i "${shortClip}" -vf "crop=608:1080:656:0,scale=1080:1920" -c:v libx264 -preset ultrafast -crf 23 "${shortScaled}"`,
+      `ffmpeg -y -i "${shortClip}" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=608:1080:656:0,scale=1080:1920" -c:v libx264 -preset ultrafast -crf 23 "${shortScaled}"`,
       { stdio: "pipe" }
     );
   } catch (e) {
