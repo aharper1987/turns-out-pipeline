@@ -15,6 +15,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMP = path.join(__dirname, "tmp");
 if (!fs.existsSync(TMP)) fs.mkdirSync(TMP, { recursive: true });
 
+// DRY_RUN: skips every YouTube-touching call (token refresh, upload, thumbnail
+// set, playlist writes, Short upload) and skips cleanup() so generated output
+// stays in tmp/ for inspection. Triggered by `--dry-run` / `--dryrun` on the
+// command line, or DRY_RUN=true in the environment.
+const DRY_RUN = process.argv.includes("--dry-run") || process.argv.includes("--dryrun") || process.env.DRY_RUN === "true";
+
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 const CONFIG = {
@@ -61,6 +67,53 @@ function log(msg, type = "info") {
 
 function assert(condition, msg) {
   if (!condition) { log(msg, "err"); process.exit(1); }
+}
+
+// Wraps text into at most maxLines lines of at most maxCharsPerLine chars
+// each. Unlike the old ad-hoc wrap logic, every line — including the last —
+// is capped: any leftover words are dropped and the final line is ellipsized
+// rather than ever overflowing the render canvas.
+function wrapTextLines(text, maxCharsPerLine, maxLines) {
+  const words = (text || "").split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = "";
+  let i = 0;
+  while (i < words.length && lines.length < maxLines) {
+    const word = words[i];
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= maxCharsPerLine) {
+      current = candidate;
+      i++;
+    } else if (!current) {
+      // single word longer than the line budget — hard-truncate it
+      current = word.slice(0, maxCharsPerLine);
+      i++;
+    } else {
+      lines.push(current);
+      current = "";
+    }
+  }
+  if (current) lines.push(current);
+  const overflow = i < words.length;
+  if (overflow && lines.length) {
+    const budget = maxCharsPerLine - 1;
+    const last = lines[lines.length - 1].replace(/[.,;:!?]*$/, "");
+    lines[lines.length - 1] = (last.length > budget ? last.slice(0, budget) : last) + "…";
+  }
+  return lines;
+}
+
+// Writes sanitized text to its own file in TMP and returns the path, for use
+// with ffmpeg drawtext's textfile= option instead of an inline text='...'
+// argument. This sidesteps filtergraph string escaping entirely — apostrophes,
+// colons and quotes in the source text pass through untouched. Backslashes
+// and percent signs are stripped since drawtext still expands %{...} and \
+// escapes when reading from a textfile.
+function writeDrawTextFile(text, name) {
+  const safe = (text || "").replace(/\\/g, "").replace(/%/g, "").trim();
+  const filePath = path.join(TMP, name);
+  fs.writeFileSync(filePath, safe, "utf8");
+  return filePath;
 }
 
 async function fetchJSON(url, options = {}) {
@@ -407,7 +460,7 @@ Respond ONLY with valid JSON, no markdown, no explanation:
     `${tagString}\n\n` +
     `New video every week. Subscribe: https://youtube.com/@TurnsOutSci\n\n` +
     `${CONFIG.MUSIC_CREDIT}`;
-  const metadata = { title: meta.title, shortTitle: meta.short_title || meta.title, description, tags: meta.tags };
+  const metadata = { title: meta.title, shortTitle: meta.short_title || meta.title, summary: meta.summary || "", description, tags: meta.tags };
   log(`Title: "${metadata.title}"`, "ok");
   return metadata;
 }
@@ -725,28 +778,22 @@ async function generateThumbnail(videoPath, metadata, topic) {
     `ffmpeg -y -i "${rawFrame}" -vf "eq=brightness=-0.28:contrast=0.88,colorchannelmixer=rr=0.92:gg=0.86:bb=0.78" "${darkenedFrame}" 2>/dev/null`,
     { stdio: "pipe" }
   );
-  const safeTitle = metadata.title.replace(/['"\\:]/g, " ").trim();
-  const words = safeTitle.split(" ");
-  let line1 = "";
-  let line2 = "";
-  for (const word of words) {
-    if ((line1 + " " + word).trim().length <= 28) {
-      line1 = (line1 + " " + word).trim();
-    } else {
-      line2 = (line2 + " " + word).trim();
-    }
-  }
-  const topicLabel = topic.label.toUpperCase().replace(/['"\\]/g, "");
+  const [line1 = "", line2 = ""] = wrapTextLines(metadata.title, 28, 2);
+  const topicLabel = topic.label.toUpperCase();
   const font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+  const topicLabelFile = writeDrawTextFile(topicLabel, "thumb_topic.txt");
+  const wordmarkFile = writeDrawTextFile("TURNS OUT", "thumb_wordmark.txt");
+  const line1File = writeDrawTextFile(line1, "thumb_line1.txt");
   let vf = [
     `drawbox=x=0:y=480:w=iw:h=240:color=#1A1610@0.72:t=fill`,
     `drawbox=x=30:y=30:w=230:h=40:color=#C17B2F@1.0:t=fill`,
-    `drawtext=fontfile='${font}':text='${topicLabel}':fontsize=18:fontcolor=#1A1610:x=42:y=41`,
-    `drawtext=fontfile='${font}':text='TURNS OUT':fontsize=15:fontcolor=#8A7F6B:x=w-tw-30:y=42`,
-    `drawtext=fontfile='${font}':text='${line1}':fontsize=54:fontcolor=#F5EDD8:x=30:y=492:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
+    `drawtext=fontfile='${font}':textfile='${topicLabelFile}':fontsize=18:fontcolor=#1A1610:x=42:y=41`,
+    `drawtext=fontfile='${font}':textfile='${wordmarkFile}':fontsize=15:fontcolor=#8A7F6B:x=w-tw-30:y=42`,
+    `drawtext=fontfile='${font}':textfile='${line1File}':fontsize=54:fontcolor=#F5EDD8:x=30:y=492:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
   ];
   if (line2) {
-    vf.push(`drawtext=fontfile='${font}':text='${line2}':fontsize=54:fontcolor=#F5EDD8:x=30:y=556:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
+    const line2File = writeDrawTextFile(line2, "thumb_line2.txt");
+    vf.push(`drawtext=fontfile='${font}':textfile='${line2File}':fontsize=54:fontcolor=#F5EDD8:x=30:y=556:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
   }
   execSync(`ffmpeg -y -i "${darkenedFrame}" -vf "${vf.join(",")}" -q:v 2 "${thumbPath}" 2>/dev/null`, { stdio: "pipe" });
   log("Thumbnail generated (1280×720 from video frame)", "ok");
@@ -1121,31 +1168,31 @@ async function assembleShort(clipPaths, metadata, topic, paper) {
   );
 
   // Step 3: Title overlay + end-screen callout
-  const safeTitle = metadata.shortTitle.replace(/['"\\:]/g, " ").trim();
-  const words = safeTitle.split(" ");
   const MAX_CHARS_PER_LINE = 13; // tuned for fontsize=64 on a 1080px-wide canvas with margin
-  let line1 = "", line2 = "", line3 = "";
-  for (const word of words) {
-    if ((line1 + " " + word).trim().length <= MAX_CHARS_PER_LINE) {
-      line1 = (line1 + " " + word).trim();
-    } else if ((line2 + " " + word).trim().length <= MAX_CHARS_PER_LINE) {
-      line2 = (line2 + " " + word).trim();
-    } else {
-      line3 = (line3 + " " + word).trim();
-    }
-  }
-  const topicLabel = topic.label.toUpperCase().replace(/['"\\]/g, "");
+  const [line1 = "", line2 = "", line3 = ""] = wrapTextLines(metadata.shortTitle, MAX_CHARS_PER_LINE, 3);
+  const topicLabel = topic.label.toUpperCase();
+
+  const topicLabelFile = writeDrawTextFile(topicLabel, "short_topic.txt");
+  const line1File = writeDrawTextFile(line1, "short_line1.txt");
+  const wordmarkFile = writeDrawTextFile("TURNS OUT", "short_wordmark.txt");
+  const calloutFile = writeDrawTextFile("Full video on channel", "short_callout.txt");
 
   let vf = [
     `drawbox=x=0:y=0:w=iw:h=700:color=#1A1610@0.75:t=fill`,
     `drawbox=x=(iw-240)/2:y=40:w=240:h=44:color=#C17B2F@1.0:t=fill`,
-    `drawtext=fontfile='${font}':text='${topicLabel}':fontsize=20:fontcolor=#1A1610:x=(w-tw)/2:y=50`,
-    `drawtext=fontfile='${font}':text='${line1}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=150:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
+    `drawtext=fontfile='${font}':textfile='${topicLabelFile}':fontsize=20:fontcolor=#1A1610:x=(w-tw)/2:y=50`,
+    `drawtext=fontfile='${font}':textfile='${line1File}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=150:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
   ];
-  if (line2) vf.push(`drawtext=fontfile='${font}':text='${line2}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=230:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
-  if (line3) vf.push(`drawtext=fontfile='${font}':text='${line3}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=310:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
-  vf.push(`drawtext=fontfile='${font}':text='TURNS OUT':fontsize=22:fontcolor=#8A7F6B:x=(w-tw)/2:y=h-60`);
-  vf.push(`drawtext=fontfile='${font}':text='Full video on channel':fontsize=24:fontcolor=#C17B2F:x=(w-tw)/2:y=h-110:enable='gte(t,${(audioDuration - 4).toFixed(1)})'`);
+  if (line2) {
+    const line2File = writeDrawTextFile(line2, "short_line2.txt");
+    vf.push(`drawtext=fontfile='${font}':textfile='${line2File}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=230:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
+  }
+  if (line3) {
+    const line3File = writeDrawTextFile(line3, "short_line3.txt");
+    vf.push(`drawtext=fontfile='${font}':textfile='${line3File}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=310:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
+  }
+  vf.push(`drawtext=fontfile='${font}':textfile='${wordmarkFile}':fontsize=22:fontcolor=#8A7F6B:x=(w-tw)/2:y=h-60`);
+  vf.push(`drawtext=fontfile='${font}':textfile='${calloutFile}':fontsize=24:fontcolor=#C17B2F:x=(w-tw)/2:y=h-110:enable='gte(t,${(audioDuration - 4).toFixed(1)})'`);
 
   try {
     execSync(
@@ -1256,7 +1303,15 @@ async function main() {
   console.log(`║     ${new Date().toISOString().slice(0, 10)}                       ║`);
   console.log("╚════════════════════════════════════════╝\n");
 
-  const missing = Object.entries(KEYS).filter(([, v]) => !v).map(([k]) => k);
+  if (DRY_RUN) {
+    log("DRY RUN — YouTube upload, thumbnail set, playlist writes, and Short upload will be skipped.", "warn");
+  }
+
+  // In DRY_RUN, the four YouTube OAuth keys aren't needed since nothing YouTube-related runs.
+  const requiredKeys = DRY_RUN
+    ? { anthropic: KEYS.anthropic, elevenlabs: KEYS.elevenlabs, pexels: KEYS.pexels }
+    : KEYS;
+  const missing = Object.entries(requiredKeys).filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) {
     log(`Missing API keys: ${missing.join(", ")}`, "err");
     log("Set them as environment variables or GitHub Secrets.", "warn");
@@ -1264,7 +1319,7 @@ async function main() {
   }
 
   try {
-    await refreshYouTubeToken();
+    if (!DRY_RUN) await refreshYouTubeToken();
     const { paper, topic } = await fetchPaperWithRetry();
     log("Topic selected: " + topic.label);
     const script    = await generateScript(paper, topic);
@@ -1274,22 +1329,34 @@ async function main() {
     const video     = await assembleVideo(clips, audio, metadata.title);
     const thumb     = await generateThumbnail(video, metadata, topic);
     const publishAt = schedulePublishTime();
-    const videoId   = await uploadToYouTube(video, metadata, publishAt);
-    await uploadThumbnail(videoId, thumb);
 
-    try {
-      const playlistId = await getOrCreatePlaylist(topic.label);
-      await addVideoToPlaylist(videoId, playlistId);
-    } catch (e) {
-      log(`Playlist error: ${e.message} — continuing`, "warn");
+    let videoId = null;
+    if (!DRY_RUN) {
+      videoId = await uploadToYouTube(video, metadata, publishAt);
+      await uploadThumbnail(videoId, thumb);
+
+      try {
+        const playlistId = await getOrCreatePlaylist(topic.label);
+        await addVideoToPlaylist(videoId, playlistId);
+      } catch (e) {
+        log(`Playlist error: ${e.message} — continuing`, "warn");
+      }
+    } else {
+      log("DRY RUN — skipping YouTube upload, thumbnail set, and playlist writes.", "warn");
     }
 
     log("\n── Generating matching Short ──");
+    let shortPath = null;
     try {
-      const { shortPath } = await assembleShort(clips, metadata, topic, paper);
-      const shortPublishAt = schedulePublishTime(); // same publish window
-      const shortId     = await uploadShort(shortPath, metadata, videoId, shortPublishAt);
-      console.log(`   Short:      https://youtube.com/shorts/${shortId}`);
+      const assembled = await assembleShort(clips, metadata, topic, paper);
+      shortPath = assembled.shortPath;
+      if (!DRY_RUN) {
+        const shortPublishAt = schedulePublishTime(); // same publish window
+        const shortId = await uploadShort(shortPath, metadata, videoId, shortPublishAt);
+        console.log(`   Short:      https://youtube.com/shorts/${shortId}`);
+      } else {
+        log("DRY RUN — skipping Short upload.", "warn");
+      }
     } catch (e) {
       log(`Short generation failed: ${e.message} — continuing without Short`, "warn");
     }
@@ -1302,16 +1369,24 @@ async function main() {
       title: metadata.title,
       publishAt,
       wordCount: script.split(" ").length,
+      dryRun: DRY_RUN,
     };
 
     fs.writeFileSync(path.join(__dirname, `run_log_${Date.now()}.json`), JSON.stringify(runLog, null, 2));
 
-    console.log("\n✅ Pipeline complete!");
-    console.log(`   Video:      https://youtube.com/watch?v=${videoId}`);
-    console.log(`   Thumbnail:  uploaded automatically`);
-    console.log(`   Publishes:  ${publishAt}\n`);
-
-    cleanup();
+    if (DRY_RUN) {
+      console.log("\n⚠ DRY RUN — skipping YouTube upload. Inspect output at:");
+      console.log(`   Video:      ${video}`);
+      console.log(`   Thumbnail:  ${thumb}`);
+      if (shortPath) console.log(`   Short:      ${shortPath}`);
+      console.log("   (tmp/ was left in place — not cleaned up)\n");
+    } else {
+      console.log("\n✅ Pipeline complete!");
+      console.log(`   Video:      https://youtube.com/watch?v=${videoId}`);
+      console.log(`   Thumbnail:  uploaded automatically`);
+      console.log(`   Publishes:  ${publishAt}\n`);
+      cleanup();
+    }
   } catch (err) {
     log(`Pipeline failed: ${err.message}`, "err");
     console.error(err);
