@@ -616,12 +616,13 @@ async function fetchPixabayClips(searchTerm, count = 6) {
 
 // ─── STEP 4: FETCH B-ROLL ─────────────────────────────────────────────────────
 
-// AI b-roll target: fewer unique clips than the old stock-footage count on
-// purpose. assembleVideo() already shuffles/loops a fixed pool to fill the
-// full runtime, so unique-clip count controls perceived variety, not cost of
-// filling the video. 8 clips x 5s x $0.07/s (Kling 2.6 Pro, audio off) =
-// ~$2.80/video in generation cost — confirmed against fal.ai's own pricing.
-const AI_BROLL_CLIP_COUNT = 8;
+// AI b-roll target: bumped from 8 to 14 (Sept 2026) after the same 4-6 clips
+// were visibly repeating throughout a 10-minute video. assembleVideo() still
+// shuffles/loops this pool to fill the full runtime, so unique-clip count is
+// what controls perceived variety, not cost of filling the video. 14 clips x
+// 5s x $0.07/s (Kling 2.6 Pro, audio off) = ~$4.90/video in generation cost —
+// confirmed against fal.ai's own pricing.
+const AI_BROLL_CLIP_COUNT = 14;
 
 // Asks Haiku for concrete, filmable AI-video prompts tied to the actual
 // finding — full scene descriptions (camera framing, subject, motion), not
@@ -807,8 +808,8 @@ async function generateVoiceover(script) {
   await new Promise((resolve, reject) => {
     const body = JSON.stringify({
       text: script,
-      model_id: "eleven_turbo_v2_5",
-      voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.2 },
+      model_id: "eleven_flash_v2_5",
+      voice_settings: { stability: 0.35, similarity_boost: 0.75, style: 0.5 },
     });
     const req = https.request(url, {
       method: "POST",
@@ -832,6 +833,114 @@ async function generateVoiceover(script) {
   return audioPath;
 }
 
+// ─── STEP 5B: GENERATE STAT CARDS ────────────────────────────────────────────
+
+// Asks Haiku to pull 3-4 concrete, numeric findings straight from the
+// abstract for on-screen stat cards — these break up the b-roll loop with an
+// actual data point instead of more stock/AI footage. Light reformatting for
+// readability is allowed (per explicit sign-off — spot-check early runs),
+// but every number must trace back to the abstract, and "%" is banned
+// outright: ffmpeg's drawtext still expands %{...} even reading from a
+// textfile, and the existing writeDrawTextFile() helper strips it, so a
+// literal "%" silently vanishes rather than erroring. Spelling it out (or
+// rewording as a ratio) is the only way to avoid a quietly wrong number on
+// screen.
+async function generateStatCards(paper, topic) {
+  assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
+  log("Generating on-screen stat cards...");
+  const prompt = `Pull 3 to 4 concrete, numeric findings directly from this abstract, for on-screen stat cards in a YouTube video.
+
+Abstract: ${paper.abstract}
+Topic: ${topic.label}
+
+Rules:
+- Every number must come from the abstract. Light rephrasing for readability is fine (e.g. "nearly 1 in 4" for "23 percent"), but never invent or round in a way that changes the finding.
+- NEVER use the "%" symbol anywhere, in headline or subtext — it will not render correctly. Always spell it out as "percent", or better, reword as a ratio/fraction ("1 in 4", "nearly a third") when it reads more naturally on screen.
+- headline: under 40 characters, the number/finding itself (e.g. "23 PERCENT LOWER RISK", "NEARLY 1 IN 4 PARTICIPANTS")
+- subtext: under 55 characters, one short phrase giving context (e.g. "in adults who slept 7+ hours nightly")
+- If the abstract doesn't contain at least 3 distinct concrete numeric findings, return fewer rather than padding with something vague — a short or empty array is fine.
+
+Respond ONLY with a JSON array, no markdown:
+[{"headline": "...", "subtext": "..."}, ...]`;
+
+  try {
+    const response = await fetchJSON("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": KEYS.anthropic,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 500,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    const raw = response.content?.[0]?.text || "";
+    const clean = raw.replace(/```json|```/g, "").trim();
+    const cards = JSON.parse(clean);
+    if (Array.isArray(cards) && cards.length) {
+      log(`Stat cards generated: ${cards.length}`, "ok");
+      return cards.slice(0, 4);
+    }
+  } catch (e) {
+    log(`Stat card generation failed — skipping stat cards: ${e.message}`, "warn");
+  }
+  return [];
+}
+
+// Fixed 4s, silent, normalized to the exact same spec as the b-roll clips
+// (1920x1080/h264/30fps/no audio) so it can be spliced straight into
+// assembleVideo()'s concat list without a separate normalization pass.
+const STAT_CARD_DURATION = 4;
+
+async function buildStatCard(card, index) {
+  const cardPath   = path.join(TMP, `statcard_${index}.mp4`);
+  const logoPath   = path.join(CONFIG.ASSETS_DIR, "logo.png");
+  const fontSerif  = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf";
+  const fontSans   = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+  const bgColor    = "#0F0B08";
+
+  const headlineLines = wrapTextLines(card.headline || "", 26, 2);
+  const headlineFile  = writeDrawTextFile(headlineLines.join("\n"), `statcard_${index}_headline.txt`);
+  const subtextFile   = writeDrawTextFile(card.subtext || "", `statcard_${index}_subtext.txt`);
+
+  const hasLogo    = fs.existsSync(logoPath);
+  const logoInput  = hasLogo ? `-loop 1 -t ${STAT_CARD_DURATION} -i "${logoPath}" ` : "";
+  const logoFilter = hasLogo
+    ? `[1:v]scale=140:-1[logo];[0:v][logo]overlay=60:50[withlogo];`
+    : `[0:v]null[withlogo];`;
+
+  const filterComplex =
+    `${logoFilter}` +
+    `[withlogo]drawtext=fontfile='${fontSerif}':textfile='${headlineFile}':fontsize=90:fontcolor=#C17B2F:line_spacing=10:x=(w-tw)/2:y=(h/2)-140:shadowcolor=black@0.5:shadowx=3:shadowy=3,` +
+    `drawtext=fontfile='${fontSans}':textfile='${subtextFile}':fontsize=40:fontcolor=#F5EDD8:x=(w-tw)/2:y=(h/2)+70[out]`;
+
+  execSync(
+    `ffmpeg -y -f lavfi -i "color=c=${bgColor}:size=1920x1080:rate=30" ${logoInput}-t ${STAT_CARD_DURATION} ` +
+    `-filter_complex "${filterComplex}" -map "[out]" ` +
+    `-c:v libx264 -preset ultrafast -crf 23 -an -t ${STAT_CARD_DURATION} "${cardPath}" 2>/dev/null`,
+    { stdio: "pipe" }
+  );
+  return cardPath;
+}
+
+async function buildStatCards(paper, topic) {
+  const cards = await generateStatCards(paper, topic);
+  if (!cards.length) return [];
+  const cardPaths = [];
+  for (let i = 0; i < cards.length; i++) {
+    try {
+      cardPaths.push(await buildStatCard(cards[i], i));
+    } catch (e) {
+      log(`Stat card ${i + 1} render failed — skipping: ${e.message}`, "warn");
+    }
+  }
+  log(`Stat cards rendered: ${cardPaths.length}/${cards.length}`, cardPaths.length ? "ok" : "warn");
+  return cardPaths;
+}
+
 // ─── STEP 6: BUILD BUMPER ────────────────────────────────────────────────────
 
 async function buildBumper() {
@@ -843,12 +952,20 @@ async function buildBumper() {
   assert(fs.existsSync(logoPath),  "Missing assets/logo.png");
   assert(fs.existsSync(musicPath), "Missing assets/bumper_music.mp3");
   const fadeOut = duration - 0.5;
+  // #0F0B08 matches the logo.png's own baked-in background exactly (sampled
+  // via PIL) — the old #0A0E1A here left a visible seam around the logo. A
+  // slow continuous zoompan (0.92x -> 1.06x over the full bumper) replaces
+  // the static hold so the open doesn't read as a cheap title card.
+  const bgColor = "#0F0B08";
+  const frames = Math.round(duration * 30);
   const filterComplex =
-    `[0:v]scale=640:360:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=#0A0E1A,` +
+    `[0:v]scale=800:-1:force_original_aspect_ratio=decrease,` +
+    `zoompan=z='min(zoom+0.0025,1.06)':d=${frames}:s=800x450:fps=30,` +
+    `pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=${bgColor},` +
     `fade=t=in:st=0:d=0.5,fade=t=out:st=${fadeOut}:d=0.5[v];` +
     `[1:a]atrim=0:${duration},afade=t=in:st=0:d=0.5,afade=t=out:st=${fadeOut}:d=0.5[a]`;
   execSync(
-    `ffmpeg -y -loop 1 -t ${duration} -i "${logoPath}" -i "${musicPath}" ` +
+    `ffmpeg -y -loop 1 -r 30 -t ${duration} -i "${logoPath}" -i "${musicPath}" ` +
     `-filter_complex "${filterComplex}" -map "[v]" -map "[a]" ` +
     `-c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k -r 30 -pix_fmt yuv420p -t ${duration} "${bumperPath}"`,
     { stdio: "pipe" }
@@ -859,7 +976,7 @@ async function buildBumper() {
 
 // ─── STEP 7: ASSEMBLE VIDEO ───────────────────────────────────────────────────
 
-async function assembleVideo(clipPaths, audioPath, title) {
+async function assembleVideo(clipPaths, audioPath, title, paper, topic) {
   log("Assembling video with FFmpeg...");
   const mainPath         = path.join(TMP, "main.mp4");
   const outputPath       = path.join(TMP, "final.mp4");
@@ -884,17 +1001,39 @@ async function assembleVideo(clipPaths, audioPath, title) {
   }
   log(`  Normalized ${normalizedPaths.length} clips`);
 
+  // Stat cards: 3-4 short on-screen data callouts pulled straight from the
+  // abstract, spliced evenly through the b-roll timeline so a long video
+  // isn't just an uninterrupted footage loop. Silent, normalized clips — they
+  // slot directly into the same concat list as the b-roll. Gracefully no-ops
+  // (empty array) if paper/topic weren't passed in or generation failed.
+  const statCardPaths = (paper && topic) ? await buildStatCards(paper, topic) : [];
+
   // Shuffle the clip order on every loop pass (instead of repeating the exact
   // same sequence each time) so a 10-minute video doesn't visibly cycle the
   // same 24-32 clips in the same order every ~90 seconds. First pass keeps the
   // original order (it's usually the most deliberately-varied one from the
   // search terms); every later pass is re-shuffled.
   const repeats = Math.ceil(audioDuration / (normalizedPaths.length * 4)) + 2;
-  let fullContent = "";
+  const entries = [];
   for (let i = 0; i < repeats; i++) {
     const order = i === 0 ? normalizedPaths : shuffle(normalizedPaths);
-    for (const p of order) fullContent += `file '${p}'\n`;
+    for (const p of order) entries.push(p);
   }
+
+  // Splice stat cards in at evenly spaced positions (index-based, not
+  // time-based — clip durations vary slightly across sources, but with
+  // dozens of entries in a long video that's close enough to feel even).
+  if (statCardPaths.length) {
+    const gap = Math.floor(entries.length / (statCardPaths.length + 1));
+    if (gap > 0) {
+      statCardPaths.forEach((cardPath, i) => {
+        const insertAt = Math.min((i + 1) * gap + i, entries.length);
+        entries.splice(insertAt, 0, cardPath);
+      });
+    }
+  }
+
+  const fullContent = entries.map((p) => `file '${p}'\n`).join("");
   fs.writeFileSync(concatList, fullContent);
 
   execSync(
@@ -1252,23 +1391,39 @@ async function buildEndCard() {
   log("Building end card (20s)...");
 
   const endCardPath = path.join(TMP, "end_card.mp4");
-  const font        = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
-  const duration    = 20;
+  const logoPath     = path.join(CONFIG.ASSETS_DIR, "logo.png");
+  const font         = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+  const duration     = 20;
+  const bgColor      = "#0F0B08";
+  const fadeOut      = duration - 0.5;
+  const frames       = Math.round(duration * 30);
 
-  const vf = [
-    `drawbox=x=0:y=0:w=iw:h=ih:color=#0A0E1A:t=fill`,
-    `drawtext=fontfile='${font}':text='turns out':fontsize=80:fontcolor=#F5EDD8:x=(w-tw)/2:y=(h/2)-120:shadowcolor=black@0.5:shadowx=2:shadowy=2`,
-    `drawtext=fontfile='${font}':text='out':fontsize=80:fontcolor=#C17B2F:x=(w-tw)/2+230:y=(h/2)-120:shadowcolor=black@0.5:shadowx=2:shadowy=2`,
-    `drawtext=fontfile='${font}':text='Scientists have been busy.':fontsize=32:fontcolor=#8A7F6B:x=(w-tw)/2:y=(h/2)`,
-    `drawtext=fontfile='${font}':text='Subscribe for more.':fontsize=28:fontcolor=#C17B2F:x=(w-tw)/2:y=(h/2)+50`,
-  ].join(",");
+  assert(fs.existsSync(logoPath), "Missing assets/logo.png");
+
+  // Reuses the real logo on its own matched background instead of hand-drawn
+  // two-tone text — the old version's second drawtext (a hardcoded-offset
+  // duplicate of "out" for fake two-tone coloring) misaligned with real
+  // ffmpeg text metrics, which is what caused the "wonky text" bug. Same
+  // slow continuous zoom as the bumper so open and close read as one
+  // production instead of two.
+  const ctaLine1 = writeDrawTextFile("Two new videos every week.", "endcard_cta1.txt");
+  const ctaLine2 = writeDrawTextFile("Subscribe for the next one.", "endcard_cta2.txt");
+
+  const filterComplex =
+    `[0:v]scale=760:-1:force_original_aspect_ratio=decrease,` +
+    `zoompan=z='min(zoom+0.0015,1.04)':d=${frames}:s=760x428:fps=30[logozoom];` +
+    `color=c=${bgColor}:size=1920x1080:rate=30:d=${duration}[bg];` +
+    `[bg][logozoom]overlay=(W-w)/2:(H-h)/2-120,` +
+    `drawtext=fontfile='${font}':textfile='${ctaLine1}':fontsize=44:fontcolor=#F5EDD8:x=(w-tw)/2:y=(h/2)+150:shadowcolor=black@0.4:shadowx=2:shadowy=2,` +
+    `drawtext=fontfile='${font}':textfile='${ctaLine2}':fontsize=28:fontcolor=#C17B2F:x=(w-tw)/2:y=(h/2)+215,` +
+    `fade=t=in:st=0:d=0.5,fade=t=out:st=${fadeOut}:d=0.5[v]`;
 
   execSync(
-    `ffmpeg -y -f lavfi -i "color=c=#0A0E1A:size=1920x1080:rate=30" -t ${duration} ` +
-    `-vf "${vf}" ` +
-    `-c:v libx264 -preset ultrafast -crf 23 ` +
+    `ffmpeg -y -loop 1 -r 30 -t ${duration} -i "${logoPath}" ` +
+    `-filter_complex "${filterComplex}" -map "[v]" ` +
+    `-c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p -r 30 ` +
     `-af "anullsrc=r=44100:cl=stereo,atrim=duration=${duration}" ` +
-    `-c:a aac -b:a 128k "${endCardPath}" 2>/dev/null`,
+    `-c:a aac -b:a 128k -t ${duration} "${endCardPath}" 2>/dev/null`,
     { stdio: "pipe" }
   );
 
@@ -1422,8 +1577,8 @@ async function assembleShort(clipPaths, metadata, topic, paper) {
   await new Promise((resolve, reject) => {
     const body = JSON.stringify({
       text: shortScript,
-      model_id: "eleven_turbo_v2_5",
-      voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.2 },
+      model_id: "eleven_flash_v2_5",
+      voice_settings: { stability: 0.35, similarity_boost: 0.75, style: 0.5 },
     });
     const req = https.request(url, {
       method: "POST",
@@ -1639,7 +1794,7 @@ async function main() {
     const metadata  = await generateMetadata(paper, script, topic);
     const clips     = await fetchFootage(topic, paper);
     const audio     = await generateVoiceover(script);
-    const video     = await assembleVideo(clips, audio, metadata.title);
+    const video     = await assembleVideo(clips, audio, metadata.title, paper, topic);
     const thumb     = await generateThumbnail(video, metadata, topic, paper);
     const publishAt = schedulePublishTime();
 
