@@ -1179,52 +1179,62 @@ async function generateAIThumbnailBackground(paper, topic) {
     log("FAL_KEY not set — skipping AI thumbnail, using video-frame fallback", "warn");
     return null;
   }
-  const concept = await generateThumbnailConcept(paper, topic);
-  log(`AI thumbnail concept: "${concept.slice(0, 100)}${concept.length > 100 ? "..." : ""}"`);
-  const imagePrompt =
-    `Bold, vivid digital illustration for a YouTube science video thumbnail. ${concept} ` +
-    `Style: bold flat colors, dramatic high-contrast lighting, slightly surreal and eye-catching, ` +
-    `cinematic composition, dark navy and warm amber color palette, no text, no words, no letters, ` +
-    `no logos, no watermarks. Leave the lower third of the frame relatively simple and uncluttered ` +
-    `so text can be overlaid there.`;
+  // Everything below — including generateThumbnailConcept()'s own Anthropic
+  // call — must stay inside this try. A prior version moved the concept
+  // call outside it while adding the fal.ai retry loop below, which meant a
+  // timeout from THAT call (not just the fal.ai one) went uncaught and
+  // killed the entire pipeline run instead of degrading to the frame-grab
+  // fallback like every other failure here does. Confirmed on a real run.
+  try {
+    const concept = await generateThumbnailConcept(paper, topic);
+    log(`AI thumbnail concept: "${concept.slice(0, 100)}${concept.length > 100 ? "..." : ""}"`);
+    const imagePrompt =
+      `Bold, vivid digital illustration for a YouTube science video thumbnail. ${concept} ` +
+      `Style: bold flat colors, dramatic high-contrast lighting, slightly surreal and eye-catching, ` +
+      `cinematic composition, dark navy and warm amber color palette, no text, no words, no letters, ` +
+      `no logos, no watermarks. Leave the lower third of the frame relatively simple and uncluttered ` +
+      `so text can be overlaid there.`;
 
-  // One retry on top of the existing graceful fallback — confirmed on a real
-  // run that this call can fail with a plain network timeout (write
-  // ETIMEDOUT), which is exactly the kind of transient failure worth one
-  // more attempt before paying the quality cost of the frame-grab fallback.
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const response = await fetchJSON("https://fal.run/fal-ai/nano-banana-pro", {
-        method: "POST",
-        headers: {
-          Authorization: `Key ${FAL_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prompt: imagePrompt,
-          aspect_ratio: "16:9",
-          resolution: "1K",
-          num_images: 1,
-        }),
-      });
-      const imageUrl = response.images?.[0]?.url;
-      if (!imageUrl) {
-        log(`AI thumbnail generation returned no image: ${JSON.stringify(response).slice(0, 300)}`, "warn");
-        return null;
+    // One retry on just the fal.ai call/download — this part alone is worth
+    // a second attempt before paying the quality cost of the frame-grab
+    // fallback. Any failure that escapes this inner loop (including from
+    // generateThumbnailConcept() above) is still caught by the outer try.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await fetchJSON("https://fal.run/fal-ai/nano-banana-pro", {
+          method: "POST",
+          headers: {
+            Authorization: `Key ${FAL_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prompt: imagePrompt,
+            aspect_ratio: "16:9",
+            resolution: "1K",
+            num_images: 1,
+          }),
+        });
+        const imageUrl = response.images?.[0]?.url;
+        if (!imageUrl) {
+          log(`AI thumbnail generation returned no image: ${JSON.stringify(response).slice(0, 300)}`, "warn");
+          return null;
+        }
+        const bgPath = path.join(TMP, "ai_thumb_bg.png");
+        await fetchBinary(imageUrl, bgPath);
+        log("AI thumbnail background generated (Nano Banana Pro, ~$0.15)", "ok");
+        return bgPath;
+      } catch (e) {
+        if (attempt === 1) {
+          log(`AI thumbnail generation failed (${e.message}) — retrying once...`, "warn");
+          await sleep(2000);
+          continue;
+        }
+        throw e; // let the outer catch below log + return null
       }
-      const bgPath = path.join(TMP, "ai_thumb_bg.png");
-      await fetchBinary(imageUrl, bgPath);
-      log("AI thumbnail background generated (Nano Banana Pro, ~$0.15)", "ok");
-      return bgPath;
-    } catch (e) {
-      if (attempt === 1) {
-        log(`AI thumbnail generation failed (${e.message}) — retrying once...`, "warn");
-        await sleep(2000);
-        continue;
-      }
-      log(`AI thumbnail generation failed — falling back to video frame: ${e.message}`, "warn");
-      return null;
     }
+  } catch (e) {
+    log(`AI thumbnail generation failed — falling back to video frame: ${e.message}`, "warn");
+    return null;
   }
 }
 
