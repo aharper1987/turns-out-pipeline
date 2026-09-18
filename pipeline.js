@@ -878,7 +878,14 @@ Respond ONLY with a JSON array, no markdown:
       }),
     });
     const raw = response.content?.[0]?.text || "";
-    const clean = raw.replace(/```json|```/g, "").trim();
+    // Haiku doesn't always honor "respond ONLY with JSON" — it can prepend a
+    // sentence or add trailing commentary even when told not to. Fence-
+    // stripping alone (the old approach) chokes on that; matching the first
+    // "[" to the last "]" pulls the array out regardless of what's around
+    // it. This is what actually failed on the first live run (raw response
+    // had non-JSON content around the array, not just markdown fences).
+    const arrayMatch = raw.match(/\[[\s\S]*\]/);
+    const clean = arrayMatch ? arrayMatch[0] : raw.replace(/```json|```/g, "").trim();
     const cards = JSON.parse(clean);
     if (Array.isArray(cards) && cards.length) {
       log(`Stat cards generated: ${cards.length}`, "ok");
