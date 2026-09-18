@@ -38,7 +38,13 @@ const CONFIG = {
   TOPICS: [
     { label: "Children's health",      query: "child+health+pediatric+disease+treatment",             pexels: "children health",       source: "pubmed" },
     { label: "Alternative therapies",  query: "psychedelic+cannabis+traditional+medicine+therapy",     pexels: "wellness alternative",  source: "pubmed" },
-    { label: "Male vs. female health", query: "sex+differences+men+women+health+outcomes",             pexels: "diverse people health", source: "pubmed" },
+    { label: "Male vs. female health", query: "sex+differences+men+women+health+outcomes",             pexels: "diverse people health", source: "pubmed",
+      // Requires one of these phrases in the paper's TITLE (see fetchPaper()) — the
+      // bare query above matched papers where sex was just one variable analyzed
+      // among many (e.g. a general dementia risk-factor cohort study), not papers
+      // actually about sex/gender comparison. Narrower on purpose; may occasionally
+      // return fewer results on a given day, which just falls through to the next topic.
+      pubmedTitleTerms: ["sex differences", "gender differences", "men and women", "sex-specific", "sex disparities"] },
     { label: "Sleep science",          query: "sleep+circadian+rest+cognitive+performance",            pexels: "sleeping person",       source: "pubmed" },
     { label: "Bacteria & viruses",     query: "microbiome+bacteria+virus+infection+immune",            pexels: "microbiology science",  source: "pubmed" },
     { label: "Brain health",           query: "brain+neuroscience+cognitive+mental+performance",       pexels: "brain neuroscience",    source: "pubmed" },
@@ -250,9 +256,20 @@ function getRollingDateWindow() {
 async function fetchPaper(topic) {
   log(`Fetching paper for topic: ${topic.label}`);
   const win = getRollingDateWindow();
+  // Most topic queries are broad on purpose (PubMed's own guidance: cast wide,
+  // narrow ranges/filters miss too many valid results). But a few bare-word
+  // queries are broad enough to match papers where the topic is incidental,
+  // not central — pubmedTitleTerms (when present) fixes that by requiring the
+  // topic to actually appear in the paper's TITLE, which is a much stronger
+  // "this paper is really about X" signal than presence anywhere in the abstract.
+  let term = topic.query.replace(/\+/g, " ");
+  if (topic.pubmedTitleTerms?.length) {
+    const titleGroup = topic.pubmedTitleTerms.map((t) => `"${t}"[Title]`).join(" OR ");
+    term = `${term} AND (${titleGroup})`;
+  }
   const searchUrl =
     `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi` +
-    `?db=pubmed&term=${topic.query}&sort=date&retmax=10&retmode=json` +
+    `?db=pubmed&term=${encodeURIComponent(term)}&sort=date&retmax=10&retmode=json` +
     `&datetype=pdat&mindate=${win.pubmedMin}&maxdate=${win.pubmedMax}`;
   const search = await fetchJSON(searchUrl);
   const ids = search.esearchresult?.idlist;
@@ -409,6 +426,7 @@ Journal: ${paper.journal || "not specified"}
 Published: ${paper.date}
 Abstract: ${paper.abstract}
 Topic category: ${topic.label}
+Editorial note: this video is filed under "${topic.label}" for the channel's topic tracking. Keep the cold open, the central throughline, and the "what this means" section anchored to that specific angle — if the paper's abstract contains multiple findings, foreground the one connected to "${topic.label}" rather than pivoting the whole video toward a more dramatic but unrelated finding buried in the same abstract. If the paper genuinely does not support that angle at all, write the best script the paper actually supports rather than forcing a false connection.
 
 Write a punchy 10-minute video script (approximately 1,400 words). Follow this structure exactly:
 
