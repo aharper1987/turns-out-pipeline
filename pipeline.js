@@ -59,6 +59,11 @@ const KEYS = {
   ytClientSecret: process.env.YT_CLIENT_SECRET,
 };
 
+// FAL_KEY is intentionally not in the required-keys list below — it's optional.
+// Missing it degrades the thumbnail to the old video-frame-grab approach
+// instead of failing the whole run. ~$0.15/video via Nano Banana Pro when set.
+const FAL_KEY = process.env.FAL_KEY;
+
 // ─── UTILITIES ───────────────────────────────────────────────────────────────
 
 function log(msg, type = "info") {
@@ -368,7 +373,9 @@ async function fetchPaperArxiv(topic) {
 async function generateScript(paper, topic) {
   assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
   log("Generating script via Claude Haiku...");
-  const prompt = `You are writing a YouTube script for "Turns Out" — a science channel that explains real research in plain, energetic English for a general audience. The tone is sharp, curious, and a little irreverent. Never dry. Never slow. Never boring.
+  const prompt = `You are writing a YouTube script for "Turns Out" — a science channel hosted by someone who just cannot get over how cool real research is. This is not a professor. This is not a documentary narrator. This is a friend who read a study an hour ago and is still buzzing about it, and has to tell you RIGHT NOW before they explode. Every finding gets treated like the single coolest thing that happened this week — because to this host, it is.
+
+The tone is delighted, breathless, "wait, WHAT?!" energy — not "researchers report" energy. Never sound like a textbook. Never sound like a press release. If a sentence could appear in a journal abstract, rewrite it until it sounds like something you'd blurt out to a friend at a bar.
 
 Study title: ${paper.title}
 Authors: ${paper.authors}${paper.affiliation ? `\nInstitution: ${paper.affiliation}` : ""}
@@ -379,19 +386,19 @@ Topic category: ${topic.label}
 
 Write a punchy 10-minute video script (approximately 1,400 words). Follow this structure exactly:
 
-1. COLD OPEN (100 words): Drop the audience into the most surprising or unsettling implication of this research — no setup, no "today we're covering," no "did you know." Start mid-thought, like a story already in progress. The first sentence must be a statement that makes someone stop scrolling. End the cold open with a single sharp question that makes them need to keep watching. No "hey guys." No preamble. Just the most interesting thing first.
+1. COLD OPEN (100 words): Drop the audience into the most surprising or unsettling implication of this research — no setup, no "today we're covering," no "did you know." Start mid-thought, like a story already in progress, mid-excitement. The first sentence must be a statement that makes someone stop scrolling — something you'd only say out loud if you genuinely could not believe it. End the cold open with a single sharp question that makes them need to keep watching. No "hey guys." No preamble. Just the most interesting thing first, delivered like you're still catching your breath over it.
 
-2. CONTEXT (150 words): Now zoom out. What problem was science trying to solve here? What did we assume before this study existed? Keep it brisk — one short paragraph establishing stakes, one short paragraph on prior thinking. End with a one-sentence bridge that pulls them into the next section.
+2. CONTEXT (150 words): Now zoom out — but keep the energy up, don't downshift into lecture mode. What problem was science trying to solve here? What did we assume before this study existed, and how were we all kind of wrong about it? Keep it brisk — one short paragraph establishing stakes, one short paragraph on prior thinking. End with a one-sentence bridge that pulls them into the next section like a "but here's the thing" moment.
 
-3. RE-HOOK #1 — THE RESEARCHERS (100 words): Introduce who ran this study. Name the lead researchers, their institutions, when and where it was published. Make it feel human and interesting — these are real people who spent years on this. End this section with a forward-pull line: tease what they were about to find.
+3. RE-HOOK #1 — THE RESEARCHERS (100 words): Introduce who ran this study like you're hyping up people who deserve it. Name the lead researchers, their institutions, when and where it was published. Make it feel human and genuinely impressive — these are real people who spent years chasing this down. End this section with a forward-pull line: tease what they were about to find like you can't wait to tell them.
 
-4. THE STUDY (200 words): Break down the methodology in plain language. Who were the subjects? What did researchers actually do? Use one concrete real-world analogy to make the method click. Keep sentences short. Keep it moving.
+4. THE STUDY (200 words): Break down the methodology in plain language, with genuine enthusiasm for how clever or ambitious it was. Who were the subjects? What did researchers actually do? Use one concrete real-world analogy to make the method click. Keep sentences short. Keep it moving.
 
-5. RE-HOOK #2 — THE FINDINGS (250 words): The results. Go through them one by one in plain English. Use scale and analogy to make numbers feel real — don't just say "thirty percent higher," say what that actually means in a person's life. Be honest about effect sizes and what the study can and can't claim. End this section with a short punchy line that pivots toward implications.
+5. RE-HOOK #2 — THE FINDINGS (250 words): The results. Go through them one by one like you're revealing plot twists. Use scale and analogy to make numbers feel real — don't just say "thirty percent higher," say what that actually means in a person's life, and let yourself react to it ("that's — okay, that's a lot"). Be honest about effect sizes and what the study can and can't claim, but don't let honesty kill the momentum. End this section with a short punchy line that pivots toward implications.
 
-6. WHAT THIS MEANS (200 words): Connect findings to real everyday life. Be specific and practical. Then honestly address one or two limitations or reasons to be skeptical — this builds trust. End with a line that opens the door to the bigger picture.
+6. WHAT THIS MEANS (200 words): Connect findings to real everyday life — make it feel personally relevant, like "this changes how YOU should think about X." Be specific and practical. Then honestly address one or two limitations or reasons to be skeptical — this builds trust, and a good host is excited AND honest, not just hype. End with a line that opens the door to the bigger picture.
 
-7. RE-HOOK #3 — THE BIGGER PICTURE (200 words): Where does this sit in the wider field? What assumptions does it challenge? What important question does it raise that nobody has answered yet? Keep this section energetic — this is where curiosity peaks, not where it winds down.
+7. RE-HOOK #3 — THE BIGGER PICTURE (200 words): Where does this sit in the wider field? What assumptions does it challenge? What important question does it raise that nobody has answered yet? This is the section where curiosity peaks — lean all the way into "okay but THIS is the part that keeps me up at night" territory.
 
 8. SIGN-OFF (100 words): Land on the single most mind-blowing takeaway from the whole video. One short punchy sentence. Then raise one final provocative question the viewer will be thinking about after they close the tab. End with exactly this line: "Turns out, scientists have been busy. And they're not done yet."
 
@@ -399,6 +406,9 @@ CRITICAL FORMATTING RULES:
 - Write ONLY the spoken words — no section labels, no stage directions, no markdown, no headers
 - Sentences must be short to medium length — maximum 20 words per sentence, aim for 12-15
 - Vary sentence length deliberately — short punchy sentences after longer ones create rhythm
+- Talk directly to the viewer using "you" often — this is a conversation, not a lecture
+- Ban clinical/press-release phrasing outright: never write "researchers found," "the study demonstrates," "data suggest," or similar. Replace with human, excited phrasing: "turns out," "get this," "here's the wild part," "so here's what actually happened," "no, seriously."
+- Use exclamation points and short reaction beats ("Wait." / "No, really." / "Let that sink in.") at the biggest moments — sparingly enough that they still hit, not on every sentence
 - Spell out all numbers and symbols for spoken audio: "twenty-three percent" not "23%", "and" not "&"
 - No bullet points, no lists — continuous flowing prose only
 - The re-hooks at sections 3, 5, and 7 should feel like natural pivots, not jarring interruptions
@@ -445,8 +455,8 @@ Topic: ${topic.label}
 
 Respond ONLY with valid JSON, no markdown, no explanation:
 {
-  "title": "YouTube video title — punchy, under 60 chars, no clickbait, hint at the finding",
-  "short_title": "YouTube Shorts title — under 40 chars, hook-first, ends with a question or surprising claim",
+  "title": "YouTube video title — should feel genuinely exciting to read, like the host can't believe this is real. Under 60 chars, hint at the finding. Excited framing is fine; don't misrepresent what the study found to get there",
+  "short_title": "YouTube Shorts title — under 40 chars, hook-first, ends with a question or surprising claim, should read like a 'wait WHAT' moment",
   "summary": "2-3 sentence plain-English summary of the key finding. Accessible, no jargon.",
   "tags": ["array", "of", "10-15", "relevant", "tags"]
 }`;
@@ -560,9 +570,105 @@ async function fetchPixabayClips(searchTerm, count = 6) {
   }
 }
 
-// ─── STEP 4: FETCH STOCK FOOTAGE ─────────────────────────────────────────────
+// ─── STEP 4: FETCH B-ROLL ─────────────────────────────────────────────────────
 
-async function fetchFootage(topic, paper) {
+// AI b-roll target: fewer unique clips than the old stock-footage count on
+// purpose. assembleVideo() already shuffles/loops a fixed pool to fill the
+// full runtime, so unique-clip count controls perceived variety, not cost of
+// filling the video. 8 clips x 5s x $0.07/s (Kling 2.6 Pro, audio off) =
+// ~$2.80/video in generation cost — confirmed against fal.ai's own pricing.
+const AI_BROLL_CLIP_COUNT = 8;
+
+// Asks Haiku for concrete, filmable AI-video prompts tied to the actual
+// finding — full scene descriptions (camera framing, subject, motion), not
+// the 2-3 word stock-search terms the old Pexels/Pixabay path used.
+async function generateBrollPrompts(paper, topic, count) {
+  assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
+  log("Generating AI b-roll scene prompts...");
+
+  const prompt = `Given this science paper, generate ${count} distinct video-generation prompts for short (5-second) b-roll clips to use in a YouTube science video.
+
+Paper title: ${paper.title}
+Topic: ${topic.label}
+Key finding (abstract): ${paper.abstract.slice(0, 500)}
+
+Rules:
+- Each prompt describes ONE concrete, filmable scene: subject, setting, and a simple camera move or subject motion (e.g. "slow push-in", "gentle pan", "subject turns to look at camera")
+- Mix of: close-up scientific/biological visuals, human lifestyle scenes relevant to the topic, abstract/conceptual visualizations, nature/environment
+- Every prompt must be visually distinct from the others — no two should produce similar-looking footage
+- No text, no words, no logos, no watermarks, no on-screen graphics in any prompt
+- Realistic, cinematic, documentary-style visuals — not cartoonish or surreal
+- Each prompt should be one or two sentences, specific enough to generate a coherent clip
+
+Respond ONLY with a JSON array of exactly ${count} strings, no markdown:
+["prompt one", "prompt two", ...]`;
+
+  const response = await fetchJSON("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": KEYS.anthropic,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 500,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  try {
+    const raw = response.content?.[0]?.text || "";
+    const clean = raw.replace(/```json|```/g, "").trim();
+    const prompts = JSON.parse(clean);
+    if (Array.isArray(prompts) && prompts.length > 0) {
+      log(`Generated ${prompts.length} b-roll prompts`, "ok");
+      return prompts;
+    }
+  } catch (e) {
+    log("Failed to parse b-roll prompts — falling back to topic default", "warn");
+  }
+  return Array(count).fill(`A cinematic, documentary-style shot related to ${topic.label}, slow camera movement, no text or graphics.`);
+}
+
+// Generates one 5s b-roll clip via fal.ai's Kling 2.6 Pro text-to-video
+// (~$0.35/clip with audio explicitly disabled — generate_audio defaults to
+// true and would double the price). Returns null (never throws) on any
+// failure so fetchFootage() can fall back to Pexels/Pixabay instead of
+// failing the whole pipeline run.
+async function generateAIBrollClip(prompt, index) {
+  try {
+    const response = await fetchJSON("https://fal.run/fal-ai/kling-video/v2.6/pro/text-to-video", {
+      method: "POST",
+      headers: {
+        Authorization: `Key ${FAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt,
+        duration: "5",
+        aspect_ratio: "16:9",
+        generate_audio: false,
+      }),
+    });
+    const videoUrl = response.video?.url;
+    if (!videoUrl) {
+      log(`  AI b-roll clip ${index + 1} returned no video: ${JSON.stringify(response).slice(0, 300)}`, "warn");
+      return null;
+    }
+    const dest = path.join(TMP, `ai_broll_${index}.mp4`);
+    await fetchBinary(videoUrl, dest);
+    log(`  AI b-roll clip ${index + 1}/${AI_BROLL_CLIP_COUNT} generated`, "ok");
+    return dest;
+  } catch (e) {
+    log(`  AI b-roll clip ${index + 1} failed: ${e.message}`, "warn");
+    return null;
+  }
+}
+
+// Old Pexels + Pixabay stock-footage sourcing — kept as the fallback path for
+// when FAL_KEY isn't set, or the AI b-roll pass comes back too thin.
+async function fetchStockFootage(topic, paper) {
   assert(KEYS.pexels, "Missing PEXELS_API_KEY");
 
   const searchTerms = await generateFootageSearchTerms(paper, topic);
@@ -622,6 +728,29 @@ async function fetchFootage(topic, paper) {
 
   log(`Downloaded ${paths.length} clips across ${searchTerms.length} search terms (Pexels + Pixabay)`, "ok");
   return paths;
+}
+
+async function fetchFootage(topic, paper) {
+  if (FAL_KEY) {
+    log(`Generating AI b-roll via Kling 2.6 Pro (${AI_BROLL_CLIP_COUNT} clips, ~$${(AI_BROLL_CLIP_COUNT * 5 * 0.07).toFixed(2)})...`);
+    const prompts = await generateBrollPrompts(paper, topic, AI_BROLL_CLIP_COUNT);
+    const aiClips = [];
+    for (let i = 0; i < prompts.length; i++) {
+      const clip = await generateAIBrollClip(prompts[i], i);
+      if (clip) aiClips.push(clip);
+    }
+    // Require at least half the target count before trusting the AI batch —
+    // otherwise fall through to stock footage rather than shipping a video
+    // that loops 2-3 clips the whole way through.
+    if (aiClips.length >= Math.ceil(AI_BROLL_CLIP_COUNT / 2)) {
+      log(`AI b-roll: ${aiClips.length}/${AI_BROLL_CLIP_COUNT} clips generated`, "ok");
+      return aiClips;
+    }
+    log(`AI b-roll only produced ${aiClips.length}/${AI_BROLL_CLIP_COUNT} usable clips — falling back to stock footage`, "warn");
+  } else {
+    log("FAL_KEY not set — using stock footage (Pexels/Pixabay)", "warn");
+  }
+  return fetchStockFootage(topic, paper);
 }
 
 // ─── STEP 5: GENERATE VOICEOVER ──────────────────────────────────────────────
@@ -810,22 +939,111 @@ async function assembleVideo(clipPaths, audioPath, title) {
 
 // ─── STEP 8: GENERATE THUMBNAIL ───────────────────────────────────────────────
 
-async function generateThumbnail(videoPath, metadata, topic) {
-  log("Generating thumbnail from video frame...");
+// Asks Haiku for one concrete, filmable visual concept tied to the actual
+// finding (not a generic "scientist in a lab" cliche), for use as the AI
+// thumbnail image prompt.
+async function generateThumbnailConcept(paper, topic) {
+  const prompt = `Come up with ONE vivid, concrete visual scene for a YouTube science video thumbnail illustrating this finding, in one or two sentences. It must be a specific, paintable image — not an abstract concept, and not a generic person-in-a-lab-coat-holding-a-test-tube unless the study is literally about lab work. Make it visually striking, slightly surreal or dramatic — the kind of image that stops a thumb mid-scroll.
+
+Study title: ${paper.title}
+Topic: ${topic.label}
+Key finding (abstract): ${paper.abstract.slice(0, 500)}
+
+Respond with ONLY the visual scene description — no preamble, no quotes, no markdown.`;
+  const response = await fetchJSON("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": KEYS.anthropic,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 150,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  const concept = response.content?.[0]?.text?.trim();
+  return concept || `A striking, symbolic scene representing: ${topic.label}`;
+}
+
+// Generates the thumbnail's background art via fal.ai's Nano Banana Pro
+// (~$0.15/video). Returns null (never throws) on any failure — including
+// FAL_KEY not being set — so generateThumbnail() can fall back to the old
+// video-frame-grab approach instead of failing the whole pipeline run.
+async function generateAIThumbnailBackground(paper, topic) {
+  if (!FAL_KEY) {
+    log("FAL_KEY not set — skipping AI thumbnail, using video-frame fallback", "warn");
+    return null;
+  }
+  try {
+    const concept = await generateThumbnailConcept(paper, topic);
+    log(`AI thumbnail concept: "${concept.slice(0, 100)}${concept.length > 100 ? "..." : ""}"`);
+    const imagePrompt =
+      `Bold, vivid digital illustration for a YouTube science video thumbnail. ${concept} ` +
+      `Style: bold flat colors, dramatic high-contrast lighting, slightly surreal and eye-catching, ` +
+      `cinematic composition, dark navy and warm amber color palette, no text, no words, no letters, ` +
+      `no logos, no watermarks. Leave the lower third of the frame relatively simple and uncluttered ` +
+      `so text can be overlaid there.`;
+    const response = await fetchJSON("https://fal.run/fal-ai/nano-banana-pro", {
+      method: "POST",
+      headers: {
+        Authorization: `Key ${FAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt: imagePrompt,
+        aspect_ratio: "16:9",
+        resolution: "1K",
+        num_images: 1,
+      }),
+    });
+    const imageUrl = response.images?.[0]?.url;
+    if (!imageUrl) {
+      log(`AI thumbnail generation returned no image: ${JSON.stringify(response).slice(0, 300)}`, "warn");
+      return null;
+    }
+    const bgPath = path.join(TMP, "ai_thumb_bg.png");
+    await fetchBinary(imageUrl, bgPath);
+    log("AI thumbnail background generated (Nano Banana Pro, ~$0.15)", "ok");
+    return bgPath;
+  } catch (e) {
+    log(`AI thumbnail generation failed — falling back to video frame: ${e.message}`, "warn");
+    return null;
+  }
+}
+
+async function generateThumbnail(videoPath, metadata, topic, paper) {
+  log("Generating thumbnail...");
   const thumbPath = path.join(TMP, "thumbnail.jpg");
-  const duration = parseFloat(
+
+  const aiBg = await generateAIThumbnailBackground(paper, topic);
+  let basePath;
+  if (aiBg) {
+    // Normalize whatever aspect/resolution fal.ai returned to an exact
+    // 1280x720 canvas so the drawtext coordinates below stay correct.
+    basePath = path.join(TMP, "thumb_base.jpg");
     execSync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`
-    ).toString().trim()
-  );
-  const seekTo = (duration * 0.20).toFixed(2);
-  const rawFrame = path.join(TMP, "raw_frame.jpg");
-  execSync(`ffmpeg -y -ss ${seekTo} -i "${videoPath}" -vframes 1 -q:v 2 "${rawFrame}" 2>/dev/null`, { stdio: "pipe" });
-  const darkenedFrame = path.join(TMP, "darkened_frame.jpg");
-  execSync(
-    `ffmpeg -y -i "${rawFrame}" -vf "eq=brightness=-0.28:contrast=0.88,colorchannelmixer=rr=0.92:gg=0.86:bb=0.78" "${darkenedFrame}" 2>/dev/null`,
-    { stdio: "pipe" }
-  );
+      `ffmpeg -y -i "${aiBg}" -vf "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720" -q:v 2 "${basePath}" 2>/dev/null`,
+      { stdio: "pipe" }
+    );
+  } else {
+    // Fallback: original video-frame-grab + color-grade approach.
+    const duration = parseFloat(
+      execSync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`
+      ).toString().trim()
+    );
+    const seekTo = (duration * 0.20).toFixed(2);
+    const rawFrame = path.join(TMP, "raw_frame.jpg");
+    execSync(`ffmpeg -y -ss ${seekTo} -i "${videoPath}" -vframes 1 -q:v 2 "${rawFrame}" 2>/dev/null`, { stdio: "pipe" });
+    basePath = path.join(TMP, "darkened_frame.jpg");
+    execSync(
+      `ffmpeg -y -i "${rawFrame}" -vf "eq=brightness=-0.28:contrast=0.88,colorchannelmixer=rr=0.92:gg=0.86:bb=0.78" "${basePath}" 2>/dev/null`,
+      { stdio: "pipe" }
+    );
+  }
+
   const [line1 = "", line2 = ""] = wrapTextLines(metadata.title, 28, 2);
   const topicLabel = topic.label.toUpperCase();
   const font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
@@ -843,8 +1061,8 @@ async function generateThumbnail(videoPath, metadata, topic) {
     const line2File = writeDrawTextFile(line2, "thumb_line2.txt");
     vf.push(`drawtext=fontfile='${font}':textfile='${line2File}':fontsize=54:fontcolor=#F5EDD8:x=30:y=556:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
   }
-  execSync(`ffmpeg -y -i "${darkenedFrame}" -vf "${vf.join(",")}" -q:v 2 "${thumbPath}" 2>/dev/null`, { stdio: "pipe" });
-  log("Thumbnail generated (1280×720 from video frame)", "ok");
+  execSync(`ffmpeg -y -i "${basePath}" -vf "${vf.join(",")}" -q:v 2 "${thumbPath}" 2>/dev/null`, { stdio: "pipe" });
+  log(`Thumbnail generated (1280×720, ${aiBg ? "AI background" : "video-frame fallback"})`, "ok");
   return thumbPath;
 }
 
@@ -1102,21 +1320,23 @@ async function generateShortScript(paper, topic) {
   assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
   log("Generating Short script...");
 
-  const prompt = `You are writing a YouTube Shorts script for "Turns Out" — a science channel. The tone is sharp, fast, and irreverent.
+  const prompt = `You are writing a YouTube Shorts script for "Turns Out" — a science channel hosted by someone who just cannot get over how cool this finding is and has to tell you before you scroll away. Delighted, breathless, "wait, WHAT?!" energy — not a news anchor reading a summary.
 
 Study title: ${paper.title}
 Topic: ${topic.label}
 Abstract: ${paper.abstract}
 
 Write a self-contained, punchy script of approximately 130 words that:
-- Opens with the single most surprising finding — no setup, no "today we're talking about"
-- Delivers 2-3 concrete details from the study in plain English
+- Opens with the single most surprising finding — no setup, no "today we're talking about" — say it like you genuinely can't believe it
+- Delivers 2-3 concrete details from the study in plain, excited English, talking directly to the viewer with "you"
+- Bans clinical phrasing like "researchers found" or "the study shows" — use "turns out," "get this," "here's the wild part" instead
 - Must work as a STANDALONE piece — the viewer has not seen the long-form video
 - Ends with exactly this line as the final sentence: "Full breakdown is one tap away."
 
 CRITICAL FORMATTING RULES:
 - Write ONLY the spoken words — no labels, no markdown
 - Short, punchy sentences — max 15 words each
+- One or two exclamation points at the biggest moment is fine — don't overdo it every line
 - Spell out numbers and symbols for spoken audio
 - Target exactly 130 words — do not go below 110 or above 150`;
 
@@ -1376,7 +1596,7 @@ async function main() {
     const clips     = await fetchFootage(topic, paper);
     const audio     = await generateVoiceover(script);
     const video     = await assembleVideo(clips, audio, metadata.title);
-    const thumb     = await generateThumbnail(video, metadata, topic);
+    const thumb     = await generateThumbnail(video, metadata, topic, paper);
     const publishAt = schedulePublishTime();
 
     let videoId = null;
