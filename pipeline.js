@@ -161,6 +161,10 @@ async function fetchBinary(url, destPath, headers = {}) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Fisher-Yates shuffle — used to re-order the b-roll clip list on each loop
 // pass so a 10-minute video doesn't replay the same clips in the same
 // sequence every ~90 seconds.
@@ -657,21 +661,30 @@ Respond ONLY with a JSON array of exactly ${count} strings, no markdown:
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 500,
+      // Scaled with count instead of a flat 500 — that was sized for the old
+      // 8-clip default. At the current 14-clip count, 14 full scene
+      // descriptions plus JSON overhead routinely exceeded 500 tokens and
+      // got cut off mid-array, which is what actually broke this on the
+      // first run after the clip-count bump (not just a parsing issue).
+      max_tokens: Math.max(500, count * 90 + 150),
       messages: [{ role: "user", content: prompt }],
     }),
   });
 
   try {
     const raw = response.content?.[0]?.text || "";
-    const clean = raw.replace(/```json|```/g, "").trim();
+    // Same non-compliance issue as generateStatCards(): Haiku can wrap the
+    // array in commentary even when told not to. Match first "[" to last
+    // "]" instead of relying on markdown-fence stripping alone.
+    const arrayMatch = raw.match(/\[[\s\S]*\]/);
+    const clean = arrayMatch ? arrayMatch[0] : raw.replace(/```json|```/g, "").trim();
     const prompts = JSON.parse(clean);
     if (Array.isArray(prompts) && prompts.length > 0) {
       log(`Generated ${prompts.length} b-roll prompts`, "ok");
       return prompts;
     }
   } catch (e) {
-    log("Failed to parse b-roll prompts — falling back to topic default", "warn");
+    log(`Failed to parse b-roll prompts (${e.message}) — falling back to topic default`, "warn");
   }
   return Array(count).fill(`A cinematic, documentary-style shot related to ${topic.label}, slow camera movement, no text or graphics.`);
 }
@@ -1166,40 +1179,52 @@ async function generateAIThumbnailBackground(paper, topic) {
     log("FAL_KEY not set — skipping AI thumbnail, using video-frame fallback", "warn");
     return null;
   }
-  try {
-    const concept = await generateThumbnailConcept(paper, topic);
-    log(`AI thumbnail concept: "${concept.slice(0, 100)}${concept.length > 100 ? "..." : ""}"`);
-    const imagePrompt =
-      `Bold, vivid digital illustration for a YouTube science video thumbnail. ${concept} ` +
-      `Style: bold flat colors, dramatic high-contrast lighting, slightly surreal and eye-catching, ` +
-      `cinematic composition, dark navy and warm amber color palette, no text, no words, no letters, ` +
-      `no logos, no watermarks. Leave the lower third of the frame relatively simple and uncluttered ` +
-      `so text can be overlaid there.`;
-    const response = await fetchJSON("https://fal.run/fal-ai/nano-banana-pro", {
-      method: "POST",
-      headers: {
-        Authorization: `Key ${FAL_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        prompt: imagePrompt,
-        aspect_ratio: "16:9",
-        resolution: "1K",
-        num_images: 1,
-      }),
-    });
-    const imageUrl = response.images?.[0]?.url;
-    if (!imageUrl) {
-      log(`AI thumbnail generation returned no image: ${JSON.stringify(response).slice(0, 300)}`, "warn");
+  const concept = await generateThumbnailConcept(paper, topic);
+  log(`AI thumbnail concept: "${concept.slice(0, 100)}${concept.length > 100 ? "..." : ""}"`);
+  const imagePrompt =
+    `Bold, vivid digital illustration for a YouTube science video thumbnail. ${concept} ` +
+    `Style: bold flat colors, dramatic high-contrast lighting, slightly surreal and eye-catching, ` +
+    `cinematic composition, dark navy and warm amber color palette, no text, no words, no letters, ` +
+    `no logos, no watermarks. Leave the lower third of the frame relatively simple and uncluttered ` +
+    `so text can be overlaid there.`;
+
+  // One retry on top of the existing graceful fallback — confirmed on a real
+  // run that this call can fail with a plain network timeout (write
+  // ETIMEDOUT), which is exactly the kind of transient failure worth one
+  // more attempt before paying the quality cost of the frame-grab fallback.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await fetchJSON("https://fal.run/fal-ai/nano-banana-pro", {
+        method: "POST",
+        headers: {
+          Authorization: `Key ${FAL_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          prompt: imagePrompt,
+          aspect_ratio: "16:9",
+          resolution: "1K",
+          num_images: 1,
+        }),
+      });
+      const imageUrl = response.images?.[0]?.url;
+      if (!imageUrl) {
+        log(`AI thumbnail generation returned no image: ${JSON.stringify(response).slice(0, 300)}`, "warn");
+        return null;
+      }
+      const bgPath = path.join(TMP, "ai_thumb_bg.png");
+      await fetchBinary(imageUrl, bgPath);
+      log("AI thumbnail background generated (Nano Banana Pro, ~$0.15)", "ok");
+      return bgPath;
+    } catch (e) {
+      if (attempt === 1) {
+        log(`AI thumbnail generation failed (${e.message}) — retrying once...`, "warn");
+        await sleep(2000);
+        continue;
+      }
+      log(`AI thumbnail generation failed — falling back to video frame: ${e.message}`, "warn");
       return null;
     }
-    const bgPath = path.join(TMP, "ai_thumb_bg.png");
-    await fetchBinary(imageUrl, bgPath);
-    log("AI thumbnail background generated (Nano Banana Pro, ~$0.15)", "ok");
-    return bgPath;
-  } catch (e) {
-    log(`AI thumbnail generation failed — falling back to video frame: ${e.message}`, "warn");
-    return null;
   }
 }
 
@@ -1500,18 +1525,31 @@ async function addVideoToPlaylist(videoId, playlistId) {
     },
   });
 
-  const response = await fetchJSON(
-    "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${KEYS.youtube}`,
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-      },
-      body,
-    }
-  );
+  const attemptInsert = () =>
+    fetchJSON(
+      "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${KEYS.youtube}`,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+        body,
+      }
+    );
+
+  let response = await attemptInsert();
+  // YouTube's playlistItems.insert can come back with a transient
+  // 409/SERVICE_UNAVAILABLE ("The operation was aborted") — confirmed on a
+  // real run where the playlist was created fine but this insert failed and
+  // was never retried, silently leaving the video out of its topic
+  // playlist. One retry after a short delay before giving up.
+  if (!response.id) {
+    log(`Playlist insert failed once (${JSON.stringify(response).slice(0, 200)}) — retrying...`, "warn");
+    await sleep(3000);
+    response = await attemptInsert();
+  }
 
   if (response.id) {
     log("Video added to playlist", "ok");
