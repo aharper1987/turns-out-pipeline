@@ -29,6 +29,7 @@ const CONFIG = {
   ELEVENLABS_VOICE_ID: "ptBd2v6mebIps3ZQEXD7",
   VIDEO_DURATION_TARGET: 600,
   BUMPER_DURATION: 3,
+  MUSIC_BED_VOLUME: 0.12, // linear gain (~-18dB) for the background music bed under narration
   ASSETS_DIR: path.join(__dirname, "assets"),
   MUSIC_CREDIT: `Music: "Upbeat Inspiring Corporate" by Pro Tunes - Copyright Safe Music | https://freemusicarchive.org/music/pro-tunes/single/upbeat-inspiring-corporate-1/`,
   TOPICS: [
@@ -149,6 +150,18 @@ async function fetchBinary(url, destPath, headers = {}) {
     };
     doRequest(url);
   });
+}
+
+// Fisher-Yates shuffle — used to re-order the b-roll clip list on each loop
+// pass so a 10-minute video doesn't replay the same clips in the same
+// sequence every ~90 seconds.
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
 function pickTopic(excludeIndices = []) {
@@ -553,7 +566,7 @@ async function fetchFootage(topic, paper) {
   assert(KEYS.pexels, "Missing PEXELS_API_KEY");
 
   const searchTerms = await generateFootageSearchTerms(paper, topic);
-  const TARGET_CLIPS = 24;
+  const TARGET_CLIPS = 32; // was 24 — more unique clips means fewer repeats over a 10-minute video
   const clipsPerTerm = Math.ceil(TARGET_CLIPS / 2 / searchTerms.length);
   const allClipUrls = [];
 
@@ -698,22 +711,57 @@ async function assembleVideo(clipPaths, audioPath, title) {
   }
   log(`  Normalized ${normalizedPaths.length} clips`);
 
-  let concatContent = "";
-  for (const p of normalizedPaths) concatContent += `file '${p}'\n`;
+  // Shuffle the clip order on every loop pass (instead of repeating the exact
+  // same sequence each time) so a 10-minute video doesn't visibly cycle the
+  // same 24-32 clips in the same order every ~90 seconds. First pass keeps the
+  // original order (it's usually the most deliberately-varied one from the
+  // search terms); every later pass is re-shuffled.
   const repeats = Math.ceil(audioDuration / (normalizedPaths.length * 4)) + 2;
   let fullContent = "";
-  for (let i = 0; i < repeats; i++) fullContent += concatContent;
+  for (let i = 0; i < repeats; i++) {
+    const order = i === 0 ? normalizedPaths : shuffle(normalizedPaths);
+    for (const p of order) fullContent += `file '${p}'\n`;
+  }
   fs.writeFileSync(concatList, fullContent);
 
   execSync(
     `ffmpeg -y -f concat -safe 0 -i "${concatList}" -t ${audioDuration} -c copy "${scaledFootage}" 2>/dev/null`,
     { stdio: "pipe" }
   );
+
+  // Background music bed: loop the bumper track under the narration at low
+  // volume, faded in/out, mixed with the voiceover (not replacing it).
+  // Falls back to voice-only if the asset is missing rather than failing the
+  // whole video.
+  const musicSrc = path.join(CONFIG.ASSETS_DIR, "bumper_music.mp3");
+  let musicBedPath = null;
+  if (fs.existsSync(musicSrc)) {
+    musicBedPath = path.join(TMP, "music_bed.m4a");
+    const fadeOutStart = Math.max(audioDuration - 2, 0);
+    try {
+      execSync(
+        `ffmpeg -y -stream_loop -1 -i "${musicSrc}" -t ${audioDuration} ` +
+        `-af "afade=t=in:st=0:d=2,afade=t=out:st=${fadeOutStart}:d=2,volume=${CONFIG.MUSIC_BED_VOLUME}" ` +
+        `-c:a aac -b:a 128k "${musicBedPath}" 2>/dev/null`,
+        { stdio: "pipe" }
+      );
+    } catch (e) {
+      log(`Music bed build failed — continuing voice-only: ${e.message}`, "warn");
+      musicBedPath = null;
+    }
+  } else {
+    log("assets/bumper_music.mp3 not found — video will be voice-only, no music bed", "warn");
+  }
+
+  const audioMixCmd = musicBedPath
+    ? `-i "${scaledFootage}" -i "${audioPath}" -i "${musicBedPath}" ` +
+      `-filter_complex "[1:a][2:a]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]" ` +
+      `-map 0:v:0 -map "[aout]"`
+    : `-i "${scaledFootage}" -i "${audioPath}" -map 0:v:0 -map 1:a:0`;
+
   const ffmpegOutput = execSync(
     `ffmpeg -y \
-      -i "${scaledFootage}" \
-      -i "${audioPath}" \
-      -map 0:v:0 -map 1:a:0 \
+      ${audioMixCmd} \
       -c:v libx264 -preset fast -crf 22 \
       -c:a aac -b:a 128k \
       -t ${audioDuration} \
@@ -1155,11 +1203,12 @@ async function assembleShort(clipPaths, metadata, topic, paper) {
   }
   assert(verticalClips.length, "No usable clips for Short");
 
-  let concatContent = "";
-  for (const p of verticalClips) concatContent += `file '${p}'\n`;
   const repeats = Math.ceil(audioDuration / (verticalClips.length * 4)) + 2;
   let fullContent = "";
-  for (let i = 0; i < repeats; i++) fullContent += concatContent;
+  for (let i = 0; i < repeats; i++) {
+    const order = i === 0 ? verticalClips : shuffle(verticalClips);
+    for (const p of order) fullContent += `file '${p}'\n`;
+  }
   fs.writeFileSync(shortConcat, fullContent);
 
   execSync(
