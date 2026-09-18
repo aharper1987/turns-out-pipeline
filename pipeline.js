@@ -32,19 +32,17 @@ const CONFIG = {
   MUSIC_BED_VOLUME: 0.12, // linear gain (~-18dB) for the background music bed under narration
   ASSETS_DIR: path.join(__dirname, "assets"),
   MUSIC_CREDIT: `Music: "Upbeat Inspiring Corporate" by Pro Tunes - Copyright Safe Music | https://freemusicarchive.org/music/pro-tunes/single/upbeat-inspiring-corporate-1/`,
+  // Shortlisted to the 7 highest-performing categories per view-data review (Sept 2026).
+  // Weight loss query has GLP-1/semaglutide/tirzepatide baked in as the current "hot topic" —
+  // see getRollingDateWindow()/note below for how to keep this list current over time.
   TOPICS: [
-    { label: "Cancer research",        query: "cancer+therapy+clinical+trial",              pexels: "laboratory science",    source: "pubmed" },
-    { label: "Brain & dementia",       query: "dementia+alzheimer+cognitive+decline",       pexels: "brain neuroscience",    source: "pubmed" },
-    { label: "Fitness & health",       query: "exercise+health+fitness+metabolism",         pexels: "exercise fitness",      source: "pubmed" },
-    { label: "Child psychology",       query: "child+psychology+development+behavior",      pexels: "children learning",     source: "pubmed" },
-    { label: "Food science",           query: "nutrition+diet+food+health+outcomes",        pexels: "healthy food",          source: "pubmed" },
-    { label: "Longevity & aging",      query: "longevity+aging+lifespan+senescence",        pexels: "aging health",          source: "pubmed" },
-    { label: "Behavioral economics",   query: "behavioral+economics+decision+bias",         pexels: "business decision",     source: "semantic" },
-    { label: "AI & machine learning",  query: "artificial+intelligence+machine+learning",   pexels: "computer technology",   source: "arxiv" },
-    { label: "Education science",      query: "learning+cognition+education+memory",        pexels: "classroom learning",    source: "semantic" },
-    { label: "Climate & environment",  query: "climate+change+environment+health+impact",   pexels: "nature environment",    source: "pubmed" },
-    { label: "Sleep science",          query: "sleep+circadian+rest+cognitive+performance", pexels: "sleeping person",       source: "pubmed" },
-    { label: "Mental health",          query: "anxiety+depression+mental+health+treatment", pexels: "mental wellness",       source: "pubmed" },
+    { label: "Children's health",      query: "child+health+pediatric+disease+treatment",             pexels: "children health",       source: "pubmed" },
+    { label: "Alternative therapies",  query: "psychedelic+cannabis+traditional+medicine+therapy",     pexels: "wellness alternative",  source: "pubmed" },
+    { label: "Male vs. female health", query: "sex+differences+men+women+health+outcomes",             pexels: "diverse people health", source: "pubmed" },
+    { label: "Sleep science",          query: "sleep+circadian+rest+cognitive+performance",            pexels: "sleeping person",       source: "pubmed" },
+    { label: "Bacteria & viruses",     query: "microbiome+bacteria+virus+infection+immune",            pexels: "microbiology science",  source: "pubmed" },
+    { label: "Brain health",           query: "brain+neuroscience+cognitive+mental+performance",       pexels: "brain neuroscience",    source: "pubmed" },
+    { label: "Weight loss",            query: "weight+loss+obesity+GLP-1+semaglutide+tirzepatide",     pexels: "fitness weight loss",   source: "pubmed" },
   ],
   PLAYLIST_IDS: null,
 };
@@ -223,14 +221,39 @@ function schedulePublishTime() {
   return d.toISOString().replace(".000", "");
 }
 
+// ─── DATE WINDOW: rolling 12 months, computed at runtime ───────────────────
+// Every paper source is filtered to "published in the last 12 months as of
+// today," instead of a fixed year range that goes stale. This is also the
+// place to plug in real trend-tracking later (e.g. pull a live "hot topics"
+// list and bias topic.query per run) — for now, hot terms (GLP-1s, etc.) are
+// hand-baked into CONFIG.TOPICS queries above and refreshed manually as
+// performance data comes in.
+function getRollingDateWindow() {
+  const now = new Date();
+  const past = new Date(now);
+  past.setMonth(past.getMonth() - 12);
+  const pad = (n) => String(n).padStart(2, "0");
+  const slash = (d) => `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+  const dash = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const compact = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}0000`;
+  return {
+    pubmedMin: slash(past),
+    pubmedMax: slash(now),
+    s2Range: `${dash(past)}:${dash(now)}`,
+    arxivMin: compact(past),
+    arxivMax: compact(now),
+  };
+}
+
 // ─── STEP 1: FETCH PAPER ─────────────────────────────────────────────────────
 
 async function fetchPaper(topic) {
   log(`Fetching paper for topic: ${topic.label}`);
+  const win = getRollingDateWindow();
   const searchUrl =
     `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi` +
     `?db=pubmed&term=${topic.query}&sort=date&retmax=10&retmode=json` +
-    `&mindate=2023&maxdate=2026`;
+    `&datetype=pdat&mindate=${win.pubmedMin}&maxdate=${win.pubmedMax}`;
   const search = await fetchJSON(searchUrl);
   const ids = search.esearchresult?.idlist;
   if (!ids?.length) throw new Error("No papers found for topic");
@@ -273,12 +296,13 @@ async function fetchPaper(topic) {
 
 async function fetchPaperSemanticScholar(topic) {
   log("Fetching from Semantic Scholar for: " + topic.label);
+  const win = getRollingDateWindow();
   const query = encodeURIComponent(topic.query.replace(/\+/g, " "));
   const url =
     "https://api.semanticscholar.org/graph/v1/paper/search" +
     "?query=" + query +
     "&fields=title,abstract,authors,year,citationCount,influentialCitationCount,externalIds,publicationDate,journal" +
-    "&limit=10&publicationDateOrYear=2023-2026";
+    "&limit=10&publicationDateOrYear=" + win.s2Range;
   const data = await fetchJSON(url, { headers: { "User-Agent": "TurnsOutPipeline/1.0" } });
   const papers = (data.data || [])
     .filter((p) => p.abstract && p.title)
@@ -313,10 +337,12 @@ async function fetchPaperSemanticScholar(topic) {
 async function fetchPaperArxiv(topic) {
   log('Fetching from arXiv for: ' + topic.label);
 
+  const win = getRollingDateWindow();
   const query = encodeURIComponent(topic.query.replace(/\+/g, ' '));
+  const dateFilter = encodeURIComponent(`AND submittedDate:[${win.arxivMin} TO ${win.arxivMax}]`);
   const url =
     'http://export.arxiv.org/api/query' +
-    '?search_query=all:' + query +
+    '?search_query=all:' + query + '+' + dateFilter +
     '&sortBy=submittedDate&sortOrder=descending' +
     '&max_results=10';
 
