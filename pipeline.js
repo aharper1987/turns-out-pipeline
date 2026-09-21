@@ -137,25 +137,42 @@ async function fetchJSON(url, options = {}) {
         catch { reject(new Error(`JSON parse failed: ${data.slice(0, 200)}`)); }
       });
     });
+    // No timeout was set here at all, so a stalled connection relied on the
+    // OS's own TCP retransmit timeout to eventually surface as ETIMEDOUT —
+    // which can take far longer than is useful. Confirmed on three straight
+    // runs where the fal.ai thumbnail call hung and its one retry never
+    // actually helped, because both attempts were each likely eating
+    // minutes on a dead socket instead of failing fast enough to matter.
+    // req.destroy(err) triggers the existing "error" handler below.
+    const timeoutMs = options.timeoutMs || 60000;
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms: ${url}`));
+    });
     req.on("error", reject);
     if (options.body) req.write(options.body);
     req.end();
   });
 }
 
-async function fetchBinary(url, destPath, headers = {}) {
+async function fetchBinary(url, destPath, headers = {}, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https") ? https : http;
     const file = fs.createWriteStream(destPath);
     const doRequest = (u) => {
-      lib.get(u, { headers }, (res) => {
+      const req = lib.get(u, { headers }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           return doRequest(res.headers.location);
         }
         res.pipe(file);
         file.on("finish", () => { file.close(); resolve(destPath); });
         file.on("error", reject);
-      }).on("error", reject);
+      });
+      // Same fail-fast rationale as fetchJSON() — a hung download shouldn't
+      // wait on the OS's own retransmit timeout.
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error(`Download timed out after ${timeoutMs}ms: ${u}`));
+      });
+      req.on("error", reject);
     };
     doRequest(url);
   });
@@ -904,6 +921,12 @@ Respond ONLY with a JSON array, no markdown:
       log(`Stat cards generated: ${cards.length}`, "ok");
       return cards.slice(0, 4);
     }
+    // This case was previously silent — JSON.parse succeeded but returned
+    // an empty (or non-array) result, which the prompt explicitly allows
+    // when a paper lacks concrete numeric findings. Logging it so a run
+    // with no stat cards is distinguishable from a genuine parse failure
+    // instead of looking identical to a code bug.
+    log(`Stat cards: model returned no usable cards — raw: ${raw.slice(0, 200)}`, "warn");
   } catch (e) {
     log(`Stat card generation failed — skipping stat cards: ${e.message}`, "warn");
   }
