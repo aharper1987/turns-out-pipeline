@@ -182,6 +182,30 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Runs async fn over items with at most `limit` in flight at once. Used for
+// the AI b-roll batch: fal's queue API means each clip's wall time is fal's
+// own queue-wait + render time, not ours, so submitting/polling them all in
+// parallel (instead of one-at-a-time) turns a ~14x serial wait into ~1x —
+// capped at `limit` concurrent in-flight requests so we don't slam fal.ai
+// with the whole batch at once.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (e) {
+        results[i] = null;
+      }
+    }
+  }
+  const workers = Array(Math.min(limit, items.length)).fill(0).map(worker);
+  await Promise.all(workers);
+  return results;
+}
+
 // Fisher-Yates shuffle — used to re-order the b-roll clip list on each loop
 // pass so a 10-minute video doesn't replay the same clips in the same
 // sequence every ~90 seconds.
@@ -194,19 +218,31 @@ function shuffle(arr) {
   return a;
 }
 
-function pickTopic(excludeIndices = []) {
-  const available = CONFIG.TOPICS
-    .map((t, i) => ({ topic: t, index: i }))
-    .filter(({ index }) => !excludeIndices.includes(index));
-  if (!available.length) throw new Error("All topics exhausted");
-  return available[Math.floor(Math.random() * available.length)];
+// Turns a topic label into a stable slug for the hidden `topic:<slug>`
+// upload tag — see the TOPIC COOLDOWN section near main() for how that tag
+// is read back to bias future topic selection away from recent repeats.
+function topicSlug(label) {
+  return label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-async function fetchPaperWithRetry() {
-  const tried = [];
-  for (let attempt = 0; attempt < CONFIG.TOPICS.length; attempt++) {
-    const { topic, index } = pickTopic(tried);
-    tried.push(index);
+// Orders topic indices with anything in `cooldownSlugs` (recently used, per
+// the hidden upload tags) pushed to the back — fresh topics are tried first
+// (in random order, so it's not always the same "first fresh" pick), stale
+// ones only as a last resort so a run never fails outright just because
+// every topic happens to be on cooldown (a small 7-topic pool with daily
+// runs will hit that eventually).
+function orderTopicsByCooldown(cooldownSlugs = []) {
+  const indices = CONFIG.TOPICS.map((_, i) => i);
+  const isFresh = (i) => !cooldownSlugs.includes(topicSlug(CONFIG.TOPICS[i].label));
+  const fresh = shuffle(indices.filter(isFresh));
+  const stale = shuffle(indices.filter((i) => !isFresh(i)));
+  return [...fresh, ...stale];
+}
+
+async function fetchPaperWithRetry(cooldownSlugs = []) {
+  const order = orderTopicsByCooldown(cooldownSlugs);
+  for (const index of order) {
+    const topic = CONFIG.TOPICS[index];
     const preferredSource = topic.source || 'pubmed';
 
     try {
@@ -222,7 +258,6 @@ async function fetchPaperWithRetry() {
     } catch (e) {
       log('Primary source failed for "' + topic.label + '": ' + e.message, "warn");
       const fallbacks = ['pubmed', 'semantic', 'arxiv'].filter(s => s !== preferredSource);
-      let succeeded = false;
       for (const fallback of fallbacks) {
         try {
           log('Trying ' + fallback + ' for "' + topic.label + '"...', "info");
@@ -235,7 +270,7 @@ async function fetchPaperWithRetry() {
           log(fallback + ' also failed: ' + e2.message, "warn");
         }
       }
-      if (!succeeded) log('All sources failed for "' + topic.label + '" — trying next topic...', "warn");
+      log('All sources failed for "' + topic.label + '" — trying next topic...', "warn");
     }
   }
   throw new Error("All topics exhausted across all sources");
@@ -501,9 +536,34 @@ CRITICAL FORMATTING RULES:
 
 // ─── STEP 3: GENERATE VIDEO METADATA ─────────────────────────────────────────
 
-async function generateMetadata(paper, script, topic) {
+// Rotates the RHETORICAL SHAPE of generated titles so the channel doesn't
+// visibly repeat the same title formula every single run — the old prompt
+// hardcoded "should read like a 'wait WHAT' moment" into short_title's own
+// field description, which overrode any variety attempt regardless of
+// anything else in the prompt. Cooldown works the same way as topic
+// selection: a hidden `titlefmt:<key>` upload tag, read back via
+// fetchRecentHiddenTags() near main(), biases which formula gets tried first.
+const TITLE_FORMULAS = [
+  { key: "shock_stat",      instruction: "Lead with the single most surprising number or statistic from the study — make the number itself the hook." },
+  { key: "myth_bust",       instruction: "Frame it as correcting a common misconception people have — challenge an assumption the viewer probably holds." },
+  { key: "direct_question", instruction: "Pose a direct, provocative question straight to the viewer that the video answers." },
+  { key: "you_statement",   instruction: "Make it personal and second-person — what this finding means for 'you' specifically, not researchers in general." },
+  { key: "reveal",          instruction: "Frame it as a reveal or plot twist — something people assumed was true getting flipped by the finding." },
+];
+
+function orderTitleFormulasByCooldown(cooldownKeys = []) {
+  const isFresh = (f) => !cooldownKeys.includes(f.key);
+  return [...shuffle(TITLE_FORMULAS.filter(isFresh)), ...shuffle(TITLE_FORMULAS.filter((f) => !isFresh(f)))];
+}
+
+function pickTitleFormula(cooldownKeys = []) {
+  return orderTitleFormulasByCooldown(cooldownKeys)[0];
+}
+
+async function generateMetadata(paper, script, topic, titleFormula = TITLE_FORMULAS[0]) {
   assert(KEYS.anthropic, "Missing ANTHROPIC_API_KEY");
   log("Generating video title, description, and tags...");
+  log(`Title formula for this run: ${titleFormula.key}`);
   const doiLine  = paper.doi ? `DOI: https://doi.org/${paper.doi}` : "";
   const pmidLine = paper.pmid && /^\d+$/.test(paper.pmid) ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${paper.pmid}/` : "";
   const linkLines = [doiLine, pmidLine].filter(Boolean).join("\n");
@@ -518,10 +578,13 @@ Script: ${script}
 Study: ${paper.title}
 Topic: ${topic.label}
 
+REQUIRED TITLE APPROACH for both "title" and "short_title" below (this rotates run to run so the channel doesn't repeat the same title formula every time — use THIS approach specifically, not your default instinct):
+${titleFormula.instruction}
+
 Respond ONLY with valid JSON, no markdown, no explanation:
 {
-  "title": "YouTube video title — should feel genuinely exciting to read, like the host can't believe this is real. Under 60 chars, hint at the finding. Excited framing is fine; don't misrepresent what the study found to get there",
-  "short_title": "YouTube Shorts title — under 40 chars, hook-first, ends with a question or surprising claim, should read like a 'wait WHAT' moment",
+  "title": "YouTube video title — should feel genuinely exciting to read, like the host can't believe this is real. Under 60 chars, hint at the finding, and follow the REQUIRED TITLE APPROACH above. Excited framing is fine; don't misrepresent what the study found to get there",
+  "short_title": "YouTube Shorts title — under 40 chars, hook-first, following the REQUIRED TITLE APPROACH above adapted to be even punchier/shorter",
   "summary": "2-3 sentence plain-English summary of the key finding. Accessible, no jargon.",
   "tags": ["array", "of", "10-15", "relevant", "tags"]
 }`;
@@ -708,12 +771,29 @@ Respond ONLY with a JSON array of exactly ${count} strings, no markdown:
 
 // Generates one 5s b-roll clip via fal.ai's Kling 2.6 Pro text-to-video
 // (~$0.35/clip with audio explicitly disabled — generate_audio defaults to
-// true and would double the price). Returns null (never throws) on any
-// failure so fetchFootage() can fall back to Pexels/Pixabay instead of
-// failing the whole pipeline run.
+// true and would double the price).
+//
+// This MUST use fal's async QUEUE API (queue.fal.run: submit -> poll status
+// -> fetch result), not the synchronous fal.run endpoint used previously.
+// fal.run blocks the HTTP request until the model finishes and is documented
+// (fal.ai/docs) as only suitable for models fast enough to answer within one
+// request/response cycle. Kling 2.6 Pro video generation routinely takes
+// well past a minute, which is exactly why every single clip was failing
+// with "Request timed out after 60000ms" in the last run — it wasn't a
+// network problem, it was the wrong endpoint for a slow model.
+//
+// Returns null (never throws) on any failure/timeout so fetchFootage() can
+// fall back to Pexels/Pixabay instead of failing the whole pipeline run.
+const KLING_APP_ID = "fal-ai/kling-video/v2.6/pro/text-to-video";
+const KLING_POLL_INTERVAL_MS = 5000;
+const KLING_MAX_WAIT_MS = 6 * 60 * 1000; // 6 min — generous for a 5s Kling clip; well under a GH Actions job timeout
+
 async function generateAIBrollClip(prompt, index) {
   try {
-    const response = await fetchJSON("https://fal.run/fal-ai/kling-video/v2.6/pro/text-to-video", {
+    // 1. Submit the job. Returns immediately with a request_id — it does NOT
+    // wait for the render to finish, so this call can keep the normal
+    // 60s-default fetchJSON timeout.
+    const submission = await fetchJSON(`https://queue.fal.run/${KLING_APP_ID}`, {
       method: "POST",
       headers: {
         Authorization: `Key ${FAL_KEY}`,
@@ -725,10 +805,47 @@ async function generateAIBrollClip(prompt, index) {
         aspect_ratio: "16:9",
         generate_audio: false,
       }),
+      timeoutMs: 20000,
     });
-    const videoUrl = response.video?.url;
+    const requestId = submission.request_id;
+    if (!requestId) {
+      log(`  AI b-roll clip ${index + 1} submit returned no request_id: ${JSON.stringify(submission).slice(0, 300)}`, "warn");
+      return null;
+    }
+
+    // 2. Poll status until COMPLETED, or give up after KLING_MAX_WAIT_MS.
+    const statusUrl = `https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}/status`;
+    const startedAt = Date.now();
+    let status = null;
+    while (Date.now() - startedAt < KLING_MAX_WAIT_MS) {
+      await sleep(KLING_POLL_INTERVAL_MS);
+      try {
+        status = await fetchJSON(statusUrl, { timeoutMs: 15000 });
+      } catch (e) {
+        // A single flaky poll shouldn't kill an otherwise-healthy queued job
+        // — keep polling until the overall wait budget runs out.
+        log(`  AI b-roll clip ${index + 1} status poll failed (${e.message}) — retrying`, "warn");
+        continue;
+      }
+      if (status.status === "COMPLETED") break;
+      if (status.status === "ERROR" || status.status === "FAILED") {
+        log(`  AI b-roll clip ${index + 1} errored in queue: ${JSON.stringify(status).slice(0, 300)}`, "warn");
+        return null;
+      }
+      // IN_QUEUE / IN_PROGRESS — keep waiting.
+    }
+    if (!status || status.status !== "COMPLETED") {
+      log(`  AI b-roll clip ${index + 1} did not complete within ${Math.round(KLING_MAX_WAIT_MS / 1000)}s — giving up`, "warn");
+      return null;
+    }
+
+    // 3. Fetch the actual result payload — the status endpoint only reports
+    // state, the finished output lives at the plain request URL once
+    // status is COMPLETED.
+    const result = await fetchJSON(`https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}`, { timeoutMs: 20000 });
+    const videoUrl = result.video?.url;
     if (!videoUrl) {
-      log(`  AI b-roll clip ${index + 1} returned no video: ${JSON.stringify(response).slice(0, 300)}`, "warn");
+      log(`  AI b-roll clip ${index + 1} returned no video: ${JSON.stringify(result).slice(0, 300)}`, "warn");
       return null;
     }
     const dest = path.join(TMP, `ai_broll_${index}.mp4`);
@@ -805,15 +922,20 @@ async function fetchStockFootage(topic, paper) {
   return paths;
 }
 
+// Max simultaneous in-flight Kling submissions. With the queue API, each
+// clip's wall time is fal's own queue-wait + render time, not ours — so
+// running all 14 through generateAIBrollClip() one-at-a-time (as before)
+// would multiply that wait ~14x for no reason, and risks running long enough
+// to hit the GitHub Actions job timeout. This caps concurrency instead of
+// firing all 14 at once, to stay reasonable against fal.ai rate limits.
+const AI_BROLL_CONCURRENCY = 4;
+
 async function fetchFootage(topic, paper) {
   if (FAL_KEY) {
-    log(`Generating AI b-roll via Kling 2.6 Pro (${AI_BROLL_CLIP_COUNT} clips, ~$${(AI_BROLL_CLIP_COUNT * 5 * 0.07).toFixed(2)})...`);
+    log(`Generating AI b-roll via Kling 2.6 Pro (${AI_BROLL_CLIP_COUNT} clips, ~$${(AI_BROLL_CLIP_COUNT * 5 * 0.07).toFixed(2)}, up to ${AI_BROLL_CONCURRENCY} in parallel)...`);
     const prompts = await generateBrollPrompts(paper, topic, AI_BROLL_CLIP_COUNT);
-    const aiClips = [];
-    for (let i = 0; i < prompts.length; i++) {
-      const clip = await generateAIBrollClip(prompts[i], i);
-      if (clip) aiClips.push(clip);
-    }
+    const results = await mapWithConcurrency(prompts, AI_BROLL_CONCURRENCY, (p, i) => generateAIBrollClip(p, i));
+    const aiClips = results.filter(Boolean);
     // Require at least half the target count before trusting the AI batch —
     // otherwise fall through to stock footage rather than shipping a video
     // that loops 2-3 clips the whole way through.
@@ -1714,8 +1836,14 @@ async function assembleShort(clipPaths, metadata, topic, paper) {
   );
 
   // Step 3: Title overlay + end-screen callout
-  const MAX_CHARS_PER_LINE = 13; // tuned for fontsize=64 on a 1080px-wide canvas with margin
-  const [line1 = "", line2 = "", line3 = ""] = wrapTextLines(metadata.shortTitle, MAX_CHARS_PER_LINE, 3);
+  // Box was 700px tall (~36% of a 1920px-tall vertical frame) — way oversized
+  // for a 1-2 line title. 380px (~20%) still comfortably fits 2 lines at
+  // fontsize=64 plus the topic pill, with room to spare. Widened the wrap
+  // budget from 13 to 20 chars/line and capped at 2 lines (was 3) to match —
+  // fewer, wider lines read faster on a Short than three narrow ones.
+  const TITLE_BOX_HEIGHT = 380;
+  const MAX_CHARS_PER_LINE = 20; // tuned for fontsize=64 on a 1080px-wide canvas with margin
+  const [line1 = "", line2 = ""] = wrapTextLines(metadata.shortTitle, MAX_CHARS_PER_LINE, 2);
   const topicLabel = topic.label.toUpperCase();
 
   const topicLabelFile = writeDrawTextFile(topicLabel, "short_topic.txt");
@@ -1724,7 +1852,7 @@ async function assembleShort(clipPaths, metadata, topic, paper) {
   const calloutFile = writeDrawTextFile("Full video on channel", "short_callout.txt");
 
   let vf = [
-    `drawbox=x=0:y=0:w=iw:h=700:color=#1A1610@0.75:t=fill`,
+    `drawbox=x=0:y=0:w=iw:h=${TITLE_BOX_HEIGHT}:color=#1A1610@0.75:t=fill`,
     `drawbox=x=(iw-240)/2:y=40:w=240:h=44:color=#C17B2F@1.0:t=fill`,
     `drawtext=fontfile='${font}':textfile='${topicLabelFile}':fontsize=20:fontcolor=#1A1610:x=(w-tw)/2:y=50`,
     `drawtext=fontfile='${font}':textfile='${line1File}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=150:shadowcolor=black@0.8:shadowx=2:shadowy=2`,
@@ -1733,19 +1861,48 @@ async function assembleShort(clipPaths, metadata, topic, paper) {
     const line2File = writeDrawTextFile(line2, "short_line2.txt");
     vf.push(`drawtext=fontfile='${font}':textfile='${line2File}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=230:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
   }
-  if (line3) {
-    const line3File = writeDrawTextFile(line3, "short_line3.txt");
-    vf.push(`drawtext=fontfile='${font}':textfile='${line3File}':fontsize=64:fontcolor=#F5EDD8:x=(w-tw)/2:y=310:shadowcolor=black@0.8:shadowx=2:shadowy=2`);
+  // Wordmark/callout were anchored at h-60/h-110 — inside YouTube's own
+  // Shorts UI safe zone, where the native like/comment/share rail and caption
+  // strip sit, so they visually collided with YouTube's own overlay. Moved
+  // up to h-300/h-360, clear of that zone on a standard 1080x1920 Short.
+  vf.push(`drawtext=fontfile='${font}':textfile='${wordmarkFile}':fontsize=22:fontcolor=#8A7F6B:x=(w-tw)/2:y=h-300`);
+  vf.push(`drawtext=fontfile='${font}':textfile='${calloutFile}':fontsize=24:fontcolor=#C17B2F:x=(w-tw)/2:y=h-360:enable='gte(t,${(audioDuration - 4).toFixed(1)})'`);
+
+  // Background music bed — Shorts previously had none at all (only footage +
+  // voiceover), unlike the long-form video. Mirrors assembleVideo()'s
+  // build-then-amix pattern: loop the same bumper track under the narration,
+  // faded in/out, low volume, falling back to voice-only if the asset is
+  // missing rather than failing the whole Short.
+  const musicSrc = path.join(CONFIG.ASSETS_DIR, "bumper_music.mp3");
+  let shortMusicBedPath = null;
+  if (fs.existsSync(musicSrc)) {
+    shortMusicBedPath = path.join(TMP, "short_music_bed.m4a");
+    const fadeOutStart = Math.max(audioDuration - 2, 0);
+    try {
+      execSync(
+        `ffmpeg -y -stream_loop -1 -i "${musicSrc}" -t ${audioDuration} ` +
+        `-af "afade=t=in:st=0:d=2,afade=t=out:st=${fadeOutStart}:d=2,volume=${CONFIG.MUSIC_BED_VOLUME}" ` +
+        `-c:a aac -b:a 128k "${shortMusicBedPath}" 2>/dev/null`,
+        { stdio: "pipe" }
+      );
+    } catch (e) {
+      log(`Short music bed build failed — continuing voice-only: ${e.message}`, "warn");
+      shortMusicBedPath = null;
+    }
+  } else {
+    log("assets/bumper_music.mp3 not found — Short will be voice-only, no music bed", "warn");
   }
-  vf.push(`drawtext=fontfile='${font}':textfile='${wordmarkFile}':fontsize=22:fontcolor=#8A7F6B:x=(w-tw)/2:y=h-60`);
-  vf.push(`drawtext=fontfile='${font}':textfile='${calloutFile}':fontsize=24:fontcolor=#C17B2F:x=(w-tw)/2:y=h-110:enable='gte(t,${(audioDuration - 4).toFixed(1)})'`);
+
+  const shortAudioMixCmd = shortMusicBedPath
+    ? `-i "${shortFootage}" -i "${shortAudio}" -i "${shortMusicBedPath}" ` +
+      `-filter_complex "[1:a][2:a]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]" ` +
+      `-map 0:v:0 -map "[aout]"`
+    : `-i "${shortFootage}" -i "${shortAudio}" -map 0:v:0 -map 1:a:0`;
 
   try {
     execSync(
       `ffmpeg -y \
-        -i "${shortFootage}" \
-        -i "${shortAudio}" \
-        -map 0:v:0 -map 1:a:0 \
+        ${shortAudioMixCmd} \
         -vf "${vf.join(",")}" \
         -c:v libx264 -preset ultrafast -crf 22 \
         -c:a aac -b:a 128k \
@@ -1842,6 +1999,65 @@ async function uploadShort(shortPath, metadata, longFormVideoId, publishTime) {
   }
 }
 
+// ─── TOPIC COOLDOWN / TITLE-FORMULA ROTATION ─────────────────────────────────
+// No new persisted repo state — instead every upload carries a hidden
+// `topic:<slug>` and `titlefmt:<key>` tag (ordinary YouTube tags, never
+// shown to viewers), and each run reads recent uploads back through the
+// YouTube API to see what's already been used lately. That read-back is the
+// entire "memory": topicSlug()/orderTopicsByCooldown() (near
+// fetchPaperWithRetry) and TITLE_FORMULAS/pickTitleFormula() (near
+// generateMetadata) consume whatever this returns.
+async function fetchRecentHiddenTags(lookback = 6) {
+  const empty = { topicSlugs: [], titleFormulaKeys: [] };
+  if (!KEYS.youtube) return empty; // DRY_RUN / no token yet — proceed without cooldown data
+  try {
+    const channelData = await fetchJSON(
+      `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id=${CONFIG.CHANNEL_ID}`,
+      { headers: { Authorization: `Bearer ${KEYS.youtube}` } }
+    );
+    const uploadsPlaylistId = channelData.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+    if (!uploadsPlaylistId) {
+      log("Could not resolve uploads playlist — proceeding without cooldown data", "warn");
+      return empty;
+    }
+
+    const itemsData = await fetchJSON(
+      `https://www.googleapis.com/youtube/v3/playlistItems?part=contentDetails&playlistId=${uploadsPlaylistId}&maxResults=50`,
+      { headers: { Authorization: `Bearer ${KEYS.youtube}` } }
+    );
+    // Sort by publish time ourselves rather than trusting playlist item
+    // order — most-recently-published first, so lookback actually means
+    // "most recent N uploads" regardless of API insertion-order quirks.
+    const items = (itemsData.items || [])
+      .map((it) => ({
+        videoId: it.contentDetails?.videoId,
+        publishedAt: it.contentDetails?.videoPublishedAt || "",
+      }))
+      .filter((it) => it.videoId)
+      .sort((a, b) => (b.publishedAt || "").localeCompare(a.publishedAt || ""));
+    const recentIds = items.slice(0, lookback).map((it) => it.videoId);
+    if (!recentIds.length) return empty;
+
+    const videosData = await fetchJSON(
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${recentIds.join(",")}`,
+      { headers: { Authorization: `Bearer ${KEYS.youtube}` } }
+    );
+    const topicSlugs = [];
+    const titleFormulaKeys = [];
+    for (const v of videosData.items || []) {
+      for (const tag of v.snippet?.tags || []) {
+        if (tag.startsWith("topic:")) topicSlugs.push(tag.slice("topic:".length));
+        else if (tag.startsWith("titlefmt:")) titleFormulaKeys.push(tag.slice("titlefmt:".length));
+      }
+    }
+    log(`Cooldown lookback: ${topicSlugs.length} topic tag(s), ${titleFormulaKeys.length} title-formula tag(s) across ${recentIds.length} recent upload(s)`, "info");
+    return { topicSlugs, titleFormulaKeys };
+  } catch (e) {
+    log(`Cooldown lookback failed (${e.message}) — proceeding without cooldown data`, "warn");
+    return empty;
+  }
+}
+
 async function main() {
   console.log("\n╔════════════════════════════════════════╗");
   console.log("║     Turns Out — Pipeline v2.1          ║");
@@ -1866,10 +2082,22 @@ async function main() {
 
   try {
     if (!DRY_RUN) await refreshYouTubeToken();
-    const { paper, topic } = await fetchPaperWithRetry();
+
+    // Cooldown/rotation data from recent uploads' hidden tags — see
+    // fetchRecentHiddenTags() above. Best-effort: an empty result (no token,
+    // API error, brand-new channel with no tagged uploads yet) just means
+    // topic/title-formula selection falls back to plain randomness.
+    const cooldown = await fetchRecentHiddenTags();
+    const titleFormula = pickTitleFormula(cooldown.titleFormulaKeys);
+
+    const { paper, topic } = await fetchPaperWithRetry(cooldown.topicSlugs);
     log("Topic selected: " + topic.label);
     const script    = await generateScript(paper, topic);
-    const metadata  = await generateMetadata(paper, script, topic);
+    const metadata  = await generateMetadata(paper, script, topic, titleFormula);
+    // Hidden, viewer-invisible tags that make the cooldown/rotation above
+    // possible on future runs — appended after generateMetadata() builds the
+    // description, so they never show up in the visible hashtag line.
+    metadata.tags = [...(metadata.tags || []), `topic:${topicSlug(topic.label)}`, `titlefmt:${titleFormula.key}`];
     const clips     = await fetchFootage(topic, paper);
     const audio     = await generateVoiceover(script);
     const video     = await assembleVideo(clips, audio, metadata.title, paper, topic);
@@ -1910,6 +2138,7 @@ async function main() {
     const runLog = {
       timestamp: new Date().toISOString(),
       topic: topic.label,
+      titleFormula: titleFormula.key,
       paper: { pmid: paper.pmid, title: paper.title, authors: paper.authors, journal: paper.journal, date: paper.date, doi: paper.doi, url: paper.url },
       videoId,
       title: metadata.title,
