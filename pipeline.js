@@ -823,13 +823,38 @@ async function generateAIBrollClip(prompt, index) {
       return null;
     }
 
+    // fal's submit response includes ready-made "status_url" / "response_url"
+    // fields for tracking this specific request (see fal.ai/docs ->
+    // Asynchronous Inference -> "Submit a Request"). Prior versions of this
+    // function reconstructed these URLs by hand as
+    // `https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}/status`,
+    // which matches fal's own generic docs example byte-for-byte — but every
+    // single poll on the last two real runs came back "HTTP 405: <empty
+    // body>" despite the URL, method (GET, the default), and auth header all
+    // matching the documented shape exactly. Kling is a third-party model
+    // proxied through fal (not a native fal app), and third-party proxies are
+    // exactly the case where a hand-built URL can diverge from how fal
+    // actually routes that specific request server-side — which is the whole
+    // reason fal hands back these URLs instead of expecting callers to
+    // rebuild them. Prefer them; fall back to manual construction (with a
+    // warning) only if fal ever omits them, so a future run's logs tell us
+    // definitively whether that fallback path is the one being exercised.
+    let statusUrl = submission.status_url;
+    let resultUrl = submission.response_url;
+    if (!statusUrl) {
+      log(`  AI b-roll clip ${index + 1} submission had no status_url — falling back to a manually-built URL`, "warn");
+      statusUrl = `https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}/status`;
+    }
+    if (!resultUrl) {
+      resultUrl = `https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}`;
+    }
+
     // 2. Poll status until COMPLETED, or give up after KLING_MAX_WAIT_MS.
     // fal.ai requires the API key on EVERY request against a queued job, not
     // just the initial submit — omitting it here (as the first version of
     // this fix did) gets a 401 with an empty body on every single poll,
     // which surfaces as an opaque "JSON parse failed" and never actually
     // times out cleanly-looking, just fails forever until the max-wait gives up.
-    const statusUrl = `https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}/status`;
     const startedAt = Date.now();
     let status = null;
     while (Date.now() - startedAt < KLING_MAX_WAIT_MS) {
@@ -842,9 +867,12 @@ async function generateAIBrollClip(prompt, index) {
       } catch (e) {
         // A single flaky poll shouldn't kill an otherwise-healthy queued job
         // — keep polling until the overall wait budget runs out.
-        log(`  AI b-roll clip ${index + 1} status poll failed (${e.message}) — retrying`, "warn");
+        log(`  AI b-roll clip ${index + 1} status poll (${statusUrl}) failed (${e.message}) — retrying`, "warn");
         continue;
       }
+      // Status responses also carry a response_url for this same request —
+      // if fal ever changes/re-signs it mid-flight, use the freshest copy.
+      if (status.response_url) resultUrl = status.response_url;
       if (status.status === "COMPLETED") break;
       if (status.status === "ERROR" || status.status === "FAILED") {
         log(`  AI b-roll clip ${index + 1} errored in queue: ${JSON.stringify(status).slice(0, 300)}`, "warn");
@@ -858,12 +886,17 @@ async function generateAIBrollClip(prompt, index) {
     }
 
     // 3. Fetch the actual result payload — the status endpoint only reports
-    // state, the finished output lives at the plain request URL once
-    // status is COMPLETED.
-    const result = await fetchJSON(`https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}`, {
-      headers: { Authorization: `Key ${FAL_KEY}` },
-      timeoutMs: 20000,
-    });
+    // state, the finished output lives at resultUrl once status is COMPLETED.
+    let result;
+    try {
+      result = await fetchJSON(resultUrl, {
+        headers: { Authorization: `Key ${FAL_KEY}` },
+        timeoutMs: 20000,
+      });
+    } catch (e) {
+      log(`  AI b-roll clip ${index + 1} result fetch (${resultUrl}) failed: ${e.message}`, "warn");
+      return null;
+    }
     const videoUrl = result.video?.url;
     if (!videoUrl) {
       log(`  AI b-roll clip ${index + 1} returned no video: ${JSON.stringify(result).slice(0, 300)}`, "warn");
