@@ -134,7 +134,17 @@ async function fetchJSON(url, options = {}) {
       res.on("data", (chunk) => (data += chunk));
       res.on("end", () => {
         try { resolve(JSON.parse(data)); }
-        catch { reject(new Error(`JSON parse failed: ${data.slice(0, 200)}`)); }
+        catch {
+          // Surfacing the HTTP status alongside whatever body we got — an
+          // empty body on a JSON-parse failure is almost always an
+          // auth/permission rejection (401/403 with no body), and that
+          // distinction was invisible before this: it just looked like
+          // "JSON parse failed: " with nothing after the colon, which reads
+          // identically whether the problem is a bad response, a redirect,
+          // or (as it turned out for the Kling status polls) a missing
+          // Authorization header on the request.
+          reject(new Error(`JSON parse failed (HTTP ${res.statusCode}): ${data.slice(0, 200) || "<empty body>"}`));
+        }
       });
     });
     // No timeout was set here at all, so a stalled connection relied on the
@@ -814,13 +824,21 @@ async function generateAIBrollClip(prompt, index) {
     }
 
     // 2. Poll status until COMPLETED, or give up after KLING_MAX_WAIT_MS.
+    // fal.ai requires the API key on EVERY request against a queued job, not
+    // just the initial submit — omitting it here (as the first version of
+    // this fix did) gets a 401 with an empty body on every single poll,
+    // which surfaces as an opaque "JSON parse failed" and never actually
+    // times out cleanly-looking, just fails forever until the max-wait gives up.
     const statusUrl = `https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}/status`;
     const startedAt = Date.now();
     let status = null;
     while (Date.now() - startedAt < KLING_MAX_WAIT_MS) {
       await sleep(KLING_POLL_INTERVAL_MS);
       try {
-        status = await fetchJSON(statusUrl, { timeoutMs: 15000 });
+        status = await fetchJSON(statusUrl, {
+          headers: { Authorization: `Key ${FAL_KEY}` },
+          timeoutMs: 15000,
+        });
       } catch (e) {
         // A single flaky poll shouldn't kill an otherwise-healthy queued job
         // — keep polling until the overall wait budget runs out.
@@ -842,7 +860,10 @@ async function generateAIBrollClip(prompt, index) {
     // 3. Fetch the actual result payload — the status endpoint only reports
     // state, the finished output lives at the plain request URL once
     // status is COMPLETED.
-    const result = await fetchJSON(`https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}`, { timeoutMs: 20000 });
+    const result = await fetchJSON(`https://queue.fal.run/${KLING_APP_ID}/requests/${requestId}`, {
+      headers: { Authorization: `Key ${FAL_KEY}` },
+      timeoutMs: 20000,
+    });
     const videoUrl = result.video?.url;
     if (!videoUrl) {
       log(`  AI b-roll clip ${index + 1} returned no video: ${JSON.stringify(result).slice(0, 300)}`, "warn");
